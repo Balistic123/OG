@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>polpNO · PS4 13.52</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#000;color:#c0c0c0;font:14px/1.7 monospace}body{padding:34px 28px}#title{color:#fff;font-size:14px;letter-spacing:.06em}#sub{color:#555;font-size:11px;margin:2px 0 28px}.row{display:flex;gap:14px;margin:6px 0;font-size:12px}.k{width:82px;color:#555}.v{color:#bbb}.ok{color:#7fbfff}.bad{color:#ff6666}hr{border:0;border-top:1px solid #171717;margin:20px 0}#note{color:#555;font-size:11px;line-height:1.9;max-width:720px}button{margin-top:18px;background:#111;border:1px solid #333;color:#bbb;padding:8px 12px;font:12px monospace;cursor:pointer}button:hover{border-color:#666;color:#fff}</style>
+</head>
+<body>
+<div id="title">polpNO · PS4 13.52</div>
+<div id="sub">firmware-locked build</div>
+<div class="row"><span class="k">firmware</span><span id="fw" class="v">detecting…</span></div>
+<div class="row"><span class="k">chain</span><span id="chain" class="v">—</span></div>
+<div class="row"><span class="k">patch</span><span id="patch" class="v">—</span></div>
+<div class="row"><span class="k">status</span><span id="status" class="v">—</span></div>
+<hr>
+<div id="note">This build accepts only PS4 13.52. It does not fall back to another firmware. The 1352 patch is pinned to the exact GitHub commit used by this build.</div>
+<button id="start" hidden>Start 13.52 chain</button>
+<script type="module">
+import { offsetsFor } from './ps4_13.52.mjs';
+const fw=document.querySelector('#fw'), chain=document.querySelector('#chain'), patch=document.querySelector('#patch'), status=document.querySelector('#status'), start=document.querySelector('#start');
+const m=navigator.userAgent.match(/PlayStation\s*4[\/ ](\d+)\.(\d+)/); const key=m?m[1]+'.'+m[2].padStart(2,'0'):null;
+if(key!=='13.52'){fw.textContent=key||'not a PS4';fw.className='v bad';status.textContent='PS4 13.52 required';status.className='v bad';}
+else{const x=offsetsFor(navigator.userAgent);fw.textContent='13.52';fw.className='v ok';chain.textContent='poops / 13.52';chain.className='v ok';patch.textContent='1352.bin · pinned';patch.className='v ok';status.textContent='ready';status.className='v ok';start.hidden=false;start.onclick=()=>location.href='poops.html';}
+if('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(()=>{});
+</script>
+</body></html>
