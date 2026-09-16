@@ -319,7 +319,7 @@ export const PS4 = {
     "13.52": {
         fw_status: "state=HW-13.52-retail "
             + "webkit=PS44-webkit-userland-measured (expm1+pop+pivot G0-G5) "
-            + "libkernel=low-PLT-resolve (not high IAT) "
+            + "bases=lk_boot measureBases1352 text-magic + low-PLT fallback "
             + "kernel_rvas=gezine-PS4_KernelOffset.java "
             + "kpatch=1352.bin bug=poops",
 

