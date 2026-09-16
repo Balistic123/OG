@@ -1,7 +1,7 @@
 // ?v=10 must match mem.js's specifier EXACTLY or core.js builds a second
 // module record and releaseFakeCell() (only call site: mem.js:662) reaches a
 // virgin instance, pinning ~137 MB for the life of the page.
-import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=11";
+import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=12";
 import { installWindowP, pairStatus } from "./mem.mjs";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
@@ -135,8 +135,8 @@ const F_SETFL = 4, O_NONBLOCK = 4;
 const IP6_RTHDR0_SIZE = 8, IN6_ADDR_SIZE = 0x10;
 const NUM_MSG_IOV = 0x17, IOVEC_SIZE = 0x10, MSGHDR_SIZE = 0x30;
 const NUM_IPV6_SOCK_DEFAULT = 0x80;
-const NUM_IOV_WORKER_DEFAULT = 3;
-const NUM_UIO_WORKER_DEFAULT = 3;
+const NUM_IOV_WORKER_DEFAULT = 2;
+const NUM_UIO_WORKER_DEFAULT = 2;
 
 const RTHDR_TAG = 0x13370000;
 const MAX_ROUNDS_TWIN = 10, MAX_ROUNDS_TRIPLET = 500, FIND_TRIPLET_FAST = 5000;
@@ -159,7 +159,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-park4wk";
 
 (async function () {
     let p = null;
@@ -688,28 +688,39 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
             const n = parseInt(params.get("ipv6"), 10);
             if (n >= 0x40 && n <= 0x100) NUM_IPV6_SOCK = n;
         }
-        async function openIpv6ReclaimSockets() {
+        async function openIpv6FdBatch(why) {
             ipv6.length = 0;
             dropGroomFootprint();
-            lines.length = 0;
-            if (outEl) outEl.textContent = "";
-            for (let y = 0; y < 4; ++y) sc(SYS.sched_yield);
             let eno = 0;
             for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
                 const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
                 if (s === -1) {
                     eno = errno();
-                    post("IPV6-SOCK-FAIL", "i=" + i + " err=" + eno);
+                    post("IPV6-SOCK-FAIL", why + " i=" + i + " err=" + eno);
                     break;
                 }
                 ipv6.push(s);
                 if ((i & 15) === 15) sc(SYS.sched_yield);
-                if ((i & 0x3f) === 0x3f)
-                    post("IPV6-OPEN-PROGRESS", i + 1 + "/" + NUM_IPV6_SOCK);
             }
-            check("reclaim-sockets-open", ipv6.length === NUM_IPV6_SOCK,
-                ipv6.length + "/" + NUM_IPV6_SOCK
+            post("IPV6-OPEN", why + " " + ipv6.length + "/" + NUM_IPV6_SOCK
                 + (eno ? " err=" + eno : ""));
+            return { n: ipv6.length, eno: eno };
+        }
+        function closeIpv6FdBatch(why) {
+            let closed = 0;
+            for (let i = 0; i < ipv6.length; ++i) {
+                if (ipv6[i] > 0) { sc(SYS.close, ipv6[i]); closed++; }
+            }
+            ipv6.length = 0;
+            post("IPV6-CLOSED", why + " n=" + closed);
+        }
+        async function openIpv6ReclaimSockets() {
+            lines.length = 0;
+            if (outEl) outEl.textContent = "";
+            for (let y = 0; y < 4; ++y) sc(SYS.sched_yield);
+            const r = await openIpv6FdBatch("reclaim");
+            check("reclaim-sockets-open", r.n === NUM_IPV6_SOCK,
+                r.n + "/" + NUM_IPV6_SOCK + (r.eno ? " err=" + r.eno : ""));
         }
         function makeRpc(w, name) {
             let seq = 0;
@@ -830,8 +841,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
         }
         dropGroomFootprint();
         lines.length = 0;
-        await groomCollect(6, 2, 50, "pre-main-pin", () => sc(SYS.sched_yield));
-        await jscBreath(10, "pre-main-pin");
+        await groomCollect(8, 0, 45, "pre-main-pin", () => sc(SYS.sched_yield));
 
         prioDv.setUint16(0, RTP_PRIO_REALTIME, true);
         prioDv.setUint16(2, RTP, true);
@@ -846,6 +856,10 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
                 + " affinity=" + a + " rtprio=" + r);
         }
         dropGroomFootprint();
+        state("ipv6 park (main-only)...", "warn");
+        await openIpv6FdBatch("park-open");
+        closeIpv6FdBatch("park-before-workers");
+        for (let y = 0; y < 6; ++y) sc(SYS.sched_yield);
 
         async function pinWorkerRealtime(w) {
             sc(SYS.sched_yield);
@@ -858,12 +872,11 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
         state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
         dropGroomFootprint();
         lines.length = 0;
-        await groomCollect(6, 0, 50, "pre-worker-pool", () => sc(SYS.sched_yield));
         for (let i = 0; i < TOTAL_WORKERS; ++i) {
             if (i > 0) {
                 dropGroomFootprint();
-                await groomCollect(3, 0, 40, "worker-gap-" + i,
-                    () => sc(SYS.sched_yield));
+                sc(SYS.sched_yield);
+                sc(SYS.sched_yield);
             }
             post("WORKER-BRINGUP", (i + 1) + "/" + TOTAL_WORKERS);
             const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
@@ -901,7 +914,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
             await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
             w.armed = true;
             w.markerArr = null;
-            await new Promise(r => setTimeout(r, 0));
+            await pinWorkerRealtime(w);
+            dropGroomFootprint();
             sc(SYS.sched_yield);
         }
         check("worker-came-arw",
@@ -909,14 +923,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
             workers.length + "/" + TOTAL_WORKERS);
         const iovWorkers = workers.slice(0, NUM_IOV_WORKER);
         const uioWorkers = workers.slice(NUM_IOV_WORKER);
-        mark("WORKER-POOLS", "iov=" + iovWorkers.length
+        post("WORKER-POOLS", "iov=" + iovWorkers.length
             + " uio=" + uioWorkers.length);
-        dropGroomFootprint();
-        for (let y = 0; y < 6; ++y) sc(SYS.sched_yield);
-        for (const w of workers) {
-            sc(SYS.sched_yield);
-            await pinWorkerRealtime(w);
-        }
         mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
             + " rtp=" + RTP);
         state("opening reclaim sockets...", "warn");
