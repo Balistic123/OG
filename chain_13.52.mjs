@@ -80,10 +80,12 @@ async function groomCollect(cycles, mb, ms, why, tick) {
     let worst = 0;
     for (let i = 0; i < cycles; ++i) {
         const c0 = Date.now();
-        let junk = [];
-        for (let k = 0; k < mb; ++k)
-            junk.push(new ArrayBuffer(0x100000));
-        junk.length = 0; junk = null;
+        if (mb > 0) {
+            let junk = [];
+            for (let k = 0; k < mb; ++k)
+                junk.push(new ArrayBuffer(0x100000));
+            junk.length = 0; junk = null;
+        }
         await new Promise(r => setTimeout(r, ms));
         if (tick) tick();
         const dt = Date.now() - c0;
@@ -155,7 +157,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-workers-then-ipv6";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
 
 (async function () {
     let p = null;
@@ -682,7 +684,9 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workers-then-ipv6";
             ipv6.length = 0;
             dropGroomFootprint();
             lines.length = 0;
-            await groomCollect(4, 1, 60, "pre-ipv6", () => sc(SYS.sched_yield));
+            // No alloc-based collect here: after 8 workers the heap cannot
+            // spare even 1 MiB temp buffers without OOM (worst_ms ~floor = no GC).
+            await groomCollect(12, 0, 48, "pre-ipv6", () => sc(SYS.sched_yield));
             let eno = 0;
             for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
                 const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
@@ -851,11 +855,11 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workers-then-ipv6";
         state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
         dropGroomFootprint();
         lines.length = 0;
-        await groomCollect(5, 1, 55, "pre-worker-pool", () => sc(SYS.sched_yield));
+        await groomCollect(6, 0, 50, "pre-worker-pool", () => sc(SYS.sched_yield));
         for (let i = 0; i < TOTAL_WORKERS; ++i) {
             if (i > 0) {
                 dropGroomFootprint();
-                await groomCollect(2, 1, 45, "worker-gap-" + i,
+                await groomCollect(3, 0, 40, "worker-gap-" + i,
                     () => sc(SYS.sched_yield));
             }
             post("WORKER-BRINGUP", (i + 1) + "/" + TOTAL_WORKERS);
@@ -905,7 +909,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workers-then-ipv6";
         mark("WORKER-POOLS", "iov=" + iovWorkers.length
             + " uio=" + uioWorkers.length);
         dropGroomFootprint();
-        await groomCollect(4, 1, 50, "pre-worker-pin", () => sc(SYS.sched_yield));
+        await groomCollect(8, 0, 45, "pre-worker-pin", () => sc(SYS.sched_yield));
         for (const w of workers) {
             sc(SYS.sched_yield);
             await pinWorkerRealtime(w);
