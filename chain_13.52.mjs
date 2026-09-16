@@ -155,7 +155,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-ipv6-before-workers";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-workers-then-ipv6";
 
 (async function () {
     let p = null;
@@ -704,7 +704,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-ipv6-before-workers";
                 ipv6.length + "/" + NUM_IPV6_SOCK
                 + (eno ? " err=" + eno : ""));
         }
-
         function makeRpc(w, name) {
             let seq = 0;
             const pending = new Map();
@@ -841,9 +840,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-ipv6-before-workers";
         }
         dropGroomFootprint();
 
-        state("opening reclaim sockets...", "warn");
-        await openIpv6ReclaimSockets();
-
         async function pinWorkerRealtime(w) {
             sc(SYS.sched_yield);
             await fireW(w, SYS.cpuset_setaffinity, [CPU_LEVEL_WHICH, CPU_WHICH_TID,
@@ -853,7 +849,16 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-ipv6-before-workers";
         }
 
         state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
+        dropGroomFootprint();
+        lines.length = 0;
+        await groomCollect(5, 1, 55, "pre-worker-pool", () => sc(SYS.sched_yield));
         for (let i = 0; i < TOTAL_WORKERS; ++i) {
+            if (i > 0) {
+                dropGroomFootprint();
+                await groomCollect(2, 1, 45, "worker-gap-" + i,
+                    () => sc(SYS.sched_yield));
+            }
+            post("WORKER-BRINGUP", (i + 1) + "/" + TOTAL_WORKERS);
             const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
                 + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
             const w = { name: name, armed: false, wired: false };
@@ -889,11 +894,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-ipv6-before-workers";
             await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
             w.armed = true;
             w.markerArr = null;
-            await pinWorkerRealtime(w);
-            if ((i & 1) === 1) {
-                dropGroomFootprint();
-                await new Promise(r => setTimeout(r, 0));
-            }
+            await new Promise(r => setTimeout(r, 0));
+            sc(SYS.sched_yield);
         }
         check("worker-came-arw",
             workers.length === TOTAL_WORKERS,
@@ -902,8 +904,16 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-ipv6-before-workers";
         const uioWorkers = workers.slice(NUM_IOV_WORKER);
         mark("WORKER-POOLS", "iov=" + iovWorkers.length
             + " uio=" + uioWorkers.length);
+        dropGroomFootprint();
+        await groomCollect(4, 1, 50, "pre-worker-pin", () => sc(SYS.sched_yield));
+        for (const w of workers) {
+            sc(SYS.sched_yield);
+            await pinWorkerRealtime(w);
+        }
         mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
             + " rtp=" + RTP);
+        state("opening reclaim sockets...", "warn");
+        await openIpv6ReclaimSockets();
         logQuiet = false;
         paintLog();
 
