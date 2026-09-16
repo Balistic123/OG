@@ -3,7 +3,7 @@ import { int64 } from "./int64.mjs";
 import {
     releaseFakeCell, fakeCellReleased,
     carrierHeaderCopy, carrierHomeVector
-} from "./core.mjs?v=14";
+} from "./core.mjs?v=15";
 
 let carrier = null;
 

