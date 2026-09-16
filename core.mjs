@@ -1173,7 +1173,9 @@ function reportComposition() {
     emit("READ-PRIMITIVE-PASS", "arbitrary-read-established"
         + "-firmware-offsets-asserted=none");
 
+    dropGroomFootprintInternal();
     try { history.replaceState(null, ""); } catch { }
+    emit("GROOM-DROPPED", "auto-on-primitive-pass");
 
     stopped = true;
     running = false;
@@ -1326,6 +1328,33 @@ export function releaseFakeCell() {
 
 export function fakeCellReleased() {
     return fakeReleased;
+}
+
+function dropGroomFootprintInternal() {
+    if (fakeReleased || liveCandidate === null)
+        return false;
+    if (fillerGraph !== null) {
+        fillerGraph.length = 0;
+        fillerGraph = null;
+    }
+    outerGraph = null;
+    keepAlive = null;
+    keepIndex = 0;
+    getterCarrier = null;
+    preparedSymbolObject = null;
+    capturedString = null;
+    capturedWords = null;
+    referenceTarget = null;
+    leakedScope = null;
+    try { clearPredecessor(); } catch (_) { }
+    predecessorWords = null;
+    return true;
+}
+
+export function dropGroomFootprint() {
+    const ok = dropGroomFootprintInternal();
+    try { history.replaceState(null, ""); } catch (_) { }
+    return { dropped: ok, reason: ok ? null : (fakeReleased ? "released" : "no-candidate") };
 }
 
 export function carrierHeaderCopy() {
