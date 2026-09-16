@@ -123,7 +123,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-poc-gadgets";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-workerjs";
 
 (async function () {
     let p = null;
@@ -638,7 +638,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-poc-gadgets";
                 else slot.resolve(d.value);
             };
             w.onerror = e => mark("WORKER-ONERROR", name + " "
-                + ((e && e.message) ? e.message : String(e)));
+                + ((e && e.message) ? e.message : "load-failed (check rpc_worker.js)"));
+            w.onmessageerror = () => mark("WORKER-MSG-ERROR", name);
 
             return function call(fname, timeoutMs, ...args) {
                 return new Promise(function (resolve, reject) {
@@ -663,7 +664,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-poc-gadgets";
                 + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
             const w = { name: name, armed: false, wired: false };
             workers.push(w);
-            w.worker = new Worker("rpc_worker.js");
+            w.worker = new Worker("rpc_worker.js?v=1");
             w.rpc = makeRpc(w.worker, name);
             if ((await w.rpc("ping", 15000)) !== "pong")
                 throw new Error(name + " did not answer ping");
