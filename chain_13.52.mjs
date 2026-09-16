@@ -1,7 +1,7 @@
 // ?v=10 must match mem.js's specifier EXACTLY or core.js builds a second
 // module record and releaseFakeCell() (only call site: mem.js:662) reaches a
 // virgin instance, pinning ~137 MB for the life of the page.
-import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=13";
+import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=14";
 import { installWindowP, pairStatus } from "./mem.mjs";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
@@ -159,7 +159,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-pre-pin-slim";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-primfix";
 
 (async function () {
     let p = null;
@@ -240,14 +240,15 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pre-pin-slim";
                 : "MISSING");
         }
 
+        logQuiet = params.get("domlog") !== "1";
+        lines.length = 0;
+        if (outEl) outEl.textContent = "";
         state("running the primitive...", "warn");
         await new Promise(r => setTimeout(r, 0));
 
-        const PRIMITIVE_LOUD = /FAIL|ERROR|THREW|RETRY|ABORT|PASS/i;
         const carrier = await establishPrimitive({
-            maxAttempts: 6,
-            onEvent: (t, d, a) => (PRIMITIVE_LOUD.test(t) ? mark : trace)
-                (t, (a != null ? "[" + a + "] " : "") + (d || ""))
+            maxAttempts: 4,
+            onEvent: (t, d, a) => trace(t, (a != null ? "[" + a + "] " : "") + (d || ""))
         });
         // THE EXPERIMENT. Promotion releases the ~137 MB the OOM is made of --
         // proven: PAIR-UP released=13 on 2026-08-16 14:44. But releaseFakeCell()
@@ -329,9 +330,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pre-pin-slim";
                 await groomCollect(COLLECT_CYCLES, COLLECT_MB, COLLECT_MS,
                     "post-groom-drop", null);
         }
-        logQuiet = params.get("domlog") !== "1";
-        lines.length = 0;
-        if (outEl) outEl.textContent = "";
         mark("PRIMITIVE-OK", "");
 
         const meas = measureBases1352(p, off);

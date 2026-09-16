@@ -1,5 +1,5 @@
 /* polpNO · PS4 13.52-only service worker */
-const CACHE='polpno-13.52-v20';
+const CACHE='polpno-13.52-v21';
 const CORE=['./','./index.html','./poops.html','./lapse.html','./chain_13.52.mjs','./lk_boot_1352.mjs','./core.mjs','./mem.mjs','./int64.mjs','./rpc_worker.js','./rpc_worker.mjs','./ps4_13.52.mjs','./payload.bin'];
 const PATCH_URL='https://raw.githubusercontent.com/OptiTronOffical/polpNO-use/aec207b31694bb182e032033a1bfab0863c171dd/patches/1352.bin';
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting())));
