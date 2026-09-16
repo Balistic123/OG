@@ -132,7 +132,7 @@ const PIPEBUF_SIZEOF = 0x18, PIPE_PAGE = 0x4000, FILEDESCENT_SIZE = 8;
 const F_SETFL = 4, O_NONBLOCK = 4;
 const IP6_RTHDR0_SIZE = 8, IN6_ADDR_SIZE = 0x10;
 const NUM_MSG_IOV = 0x17, IOVEC_SIZE = 0x10, MSGHDR_SIZE = 0x30;
-const NUM_IPV6_SOCK = 0x100;
+const NUM_IPV6_SOCK_DEFAULT = 0x100;
 
 const RTHDR_TAG = 0x13370000;
 const MAX_ROUNDS_TWIN = 10, MAX_ROUNDS_TRIPLET = 500, FIND_TRIPLET_FAST = 5000;
@@ -155,7 +155,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix2";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-ipv6-before-workers";
 
 (async function () {
     let p = null;
@@ -673,21 +673,36 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix2";
         new Uint8Array(uioIovAb).fill(0);
         put(uioIovDv, 0, dummyAddr);
         const ipv6 = [];
+        let NUM_IPV6_SOCK = NUM_IPV6_SOCK_DEFAULT;
+        if (params.has("ipv6")) {
+            const n = parseInt(params.get("ipv6"), 10);
+            if (n >= 0x40 && n <= 0x100) NUM_IPV6_SOCK = n;
+        }
         async function openIpv6ReclaimSockets() {
             ipv6.length = 0;
             dropGroomFootprint();
+            lines.length = 0;
+            await groomCollect(4, 1, 60, "pre-ipv6", () => sc(SYS.sched_yield));
+            let eno = 0;
             for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
                 const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
-                if (s === -1) break;
+                if (s === -1) {
+                    eno = errno();
+                    post("IPV6-SOCK-FAIL", "i=" + i + " err=" + eno);
+                    break;
+                }
                 ipv6.push(s);
-                if ((i & 0x1f) === 0x1f) {
+                if ((i & 7) === 7) {
                     dropGroomFootprint();
                     await new Promise(r => setTimeout(r, 0));
                     sc(SYS.sched_yield);
                 }
+                if ((i & 0x3f) === 0x3f)
+                    post("IPV6-OPEN-PROGRESS", i + 1 + "/" + NUM_IPV6_SOCK);
             }
             check("reclaim-sockets-open", ipv6.length === NUM_IPV6_SOCK,
-                ipv6.length + "/" + NUM_IPV6_SOCK);
+                ipv6.length + "/" + NUM_IPV6_SOCK
+                + (eno ? " err=" + eno : ""));
         }
 
         function makeRpc(w, name) {
@@ -826,6 +841,9 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix2";
         }
         dropGroomFootprint();
 
+        state("opening reclaim sockets...", "warn");
+        await openIpv6ReclaimSockets();
+
         async function pinWorkerRealtime(w) {
             sc(SYS.sched_yield);
             await fireW(w, SYS.cpuset_setaffinity, [CPU_LEVEL_WHICH, CPU_WHICH_TID,
@@ -870,6 +888,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix2";
             await w.rpc("setup", 15000, wl.low, wl.hi);
             await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
             w.armed = true;
+            w.markerArr = null;
             await pinWorkerRealtime(w);
             if ((i & 1) === 1) {
                 dropGroomFootprint();
@@ -885,8 +904,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix2";
             + " uio=" + uioWorkers.length);
         mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
             + " rtp=" + RTP);
-        state("opening reclaim sockets...", "warn");
-        await openIpv6ReclaimSockets();
         logQuiet = false;
         paintLog();
 
