@@ -318,35 +318,35 @@ export const PS4 = {
     },
     "13.52": {
         fw_status: "state=HW-13.52-retail "
-            + "webkit=PS44-webkit-userland-measured (expm1+pop+pivot G0-G5) "
-            + "bases=lk_boot measureBases1352 text-magic + low-PLT fallback "
+            + "webkit=gadgets=poc/ps4_offsets.js 13.52 (13.00 seeds + measureBases1352) "
+            + "libkernel=measure text-magic + low-PLT fallback "
             + "kernel_rvas=gezine-PS4_KernelOffset.java "
             + "kpatch=1352.bin bug=poops",
 
-        wk_expm1_builtin:                   0xeb6350,
+        wk_expm1_builtin:                   0x2586880,
         wk_JSFunction_m_function:           0x28,
 
-        wk_POP_RDI_RET:                     0x4be55,
-        wk_POP_RSI_RET:                     0x7acb3,
-        wk_POP_RDX_RET:                     0x30b1e9,
-        wk_POP_RCX_RET:                     0xeaf246,
-        wk_POP_RAX_RET:                     0x3424a,
-        wk_POP_R8_RET:                      0x5d185,
-        wk_POP_R9_RET:                      0x9b288b,
-        wk_LEAVE_RET:                       0xf195b,
-        wk_MOV_QWORD_PTR_RDI_RAX_RET:       0x1f9bb,
-        wk_PUSH_RDX_POP_RSP_RET:            0x13ec77a,
-        wk_MOV_RDI_RSI_30_CALL:             0x128f418,
-        wk_POP_RAX_MOV_RAX_JMP_18:          0x6c84b3,
-        wk_PUSH_RBP_MOV_RBP_RSP_10:         0x246750,
-        wk_MOV_RDI_RAX_8_CALL_20:           0x487d2,
-        wk_MOV_RDX_RAX_18_CALL_10:          0x7f35aa,
+        wk_POP_RDI_RET:                     0x5c480,
+        wk_POP_RSI_RET:                     0x6e45e,
+        wk_POP_RDX_RET:                     0x12c5ba,
+        wk_POP_RCX_RET:                     0x1bade,
+        wk_POP_RAX_RET:                     0x10504,
+        wk_POP_R8_RET:                      0x9b311,
+        wk_POP_R9_RET:                      0x1dcfb1,
+        wk_LEAVE_RET:                       0x182f7,
+        wk_MOV_QWORD_PTR_RDI_RAX_RET:       0x548b,
+        wk_PUSH_RDX_POP_RSP_RET:            0x2abccaa,
+        wk_MOV_RDI_RSI_30_CALL:             0x295f948,
+        wk_POP_RAX_MOV_RAX_JMP_18:          0x1d989e3,
+        wk_PUSH_RBP_MOV_RBP_RSP_10:         0x25bae0,
+        wk_MOV_RDI_RAX_8_CALL_20:           0x4a0406,
+        wk_MOV_RDX_RAX_18_CALL_10:          0x1ec3ada,
 
         pivot_view_sp:                      0x38,
         wk_ArrayBuffer_m_impl:              0x10,
         wk_ArrayBuffer_m_contents_m_data:   0x10,
 
-        wk___imp___error:                   null,
+        wk___imp___error:                   0x3cb8cc8,
         k_usleep:                           0x13b20,
         k__error:                           0x1bb0,
 

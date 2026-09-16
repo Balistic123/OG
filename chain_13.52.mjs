@@ -123,7 +123,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-poc-bases";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-poc-gadgets";
 
 (async function () {
     let p = null;
