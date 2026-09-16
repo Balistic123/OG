@@ -126,7 +126,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
 
 (async function () {
     let p = null;
@@ -636,13 +636,17 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix";
         new Uint8Array(uioIovAb).fill(0);
         put(uioIovDv, 0, dummyAddr);
         const ipv6 = [];
-        for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
-            const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
-            if (s === -1) break;
-            ipv6.push(s);
+        function openIpv6ReclaimSockets() {
+            ipv6.length = 0;
+            dropGroomFootprint();
+            for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
+                const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
+                if (s === -1) break;
+                ipv6.push(s);
+            }
+            check("reclaim-sockets-open", ipv6.length === NUM_IPV6_SOCK,
+                ipv6.length + "/" + NUM_IPV6_SOCK);
         }
-        check("reclaim-sockets-open", ipv6.length === NUM_IPV6_SOCK,
-            ipv6.length + "/" + NUM_IPV6_SOCK);
 
         function makeRpc(w, name) {
             let seq = 0;
@@ -677,8 +681,84 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix";
         const NUM_UIO_WORKER = params.has("uio")
             ? parseInt(params.get("uio"), 10) : 4;
         const TOTAL_WORKERS = NUM_IOV_WORKER + NUM_UIO_WORKER;
+
+        const prioAb = new ArrayBuffer(8), maskAb = new ArrayBuffer(0x10);
+        keepAlive.push(prioAb, maskAb);
+        const prioAddr = bufAddr(prioAb), maskAddr = bufAddr(maskAb);
+        const prioDv = new DataView(prioAb), maskDv = new DataView(maskAb);
+
+        function fireW(w, num, args, timeoutMs) {
+            if (!w.ctx) w.ctx = makeCtx(false);
+            const stub = stubAddr.get(num);
+            if (!stub)
+                throw new Error("fireW: missing stub num=0x" + (num >>> 0).toString(16));
+            layout(w.ctx, stub, args);
+            return w.rpc("fire", timeoutMs === undefined ? 15000 : timeoutMs,
+                w.ctx.S.low, w.ctx.S.hi);
+        }
+
+        new Uint8Array(maskAb).fill(0);
+        sc(SYS.cpuset_getaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
+            new int64(0xffffffff, 0xffffffff), 0x10, maskAddr);
+        savedMask = new int64(maskDv.getUint32(0, true), maskDv.getUint32(4, true));
+        prioDv.setUint16(0, 0xffff, true);
+        prioDv.setUint16(2, 0xffff, true);
+        sc(SYS.rtprio_thread, RTP_LOOKUP, 0, prioAddr);
+        savedPrio = [prioDv.getUint16(0, true), prioDv.getUint16(2, true)];
+
+        async function restoreThreadAttrs(why) {
+            if (attrsRestored || !savedMask || !savedPrio) return;
+            attrsRestored = true;
+            const ID = new int64(0xffffffff, 0xffffffff);
+
+            new Uint8Array(maskAb).fill(0);
+            maskDv.setUint32(0, savedMask.low, true);
+            maskDv.setUint32(4, savedMask.hi, true);
+            const ar = sc(SYS.cpuset_setaffinity, CPU_LEVEL_WHICH,
+                CPU_WHICH_TID, ID, 0x10, maskAddr).i32;
+            prioDv.setUint16(0, savedPrio[0], true);
+            prioDv.setUint16(2, savedPrio[1], true);
+            const pr = sc(SYS.rtprio_thread, RTP_SET, 0, prioAddr).i32;
+
+            new Uint8Array(maskAb).fill(0);
+            sc(SYS.cpuset_getaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
+                ID, 0x10, maskAddr);
+            const backMask = new int64(maskDv.getUint32(0, true),
+                                       maskDv.getUint32(4, true));
+            prioDv.setUint16(0, 0xffff, true);
+            prioDv.setUint16(2, 0xffff, true);
+            sc(SYS.rtprio_thread, RTP_LOOKUP, 0, prioAddr);
+            const backPrio = [prioDv.getUint16(0, true), prioDv.getUint16(2, true)];
+            const good = backMask.low === savedMask.low
+                && backMask.hi === savedMask.hi
+                && backPrio[0] === savedPrio[0] && backPrio[1] === savedPrio[1];
+            mark("THREAD-ATTRS-RESTORED", "at=" + why + " affinity=" + ar
+                + " rtprio=" + pr + " mask=" + backMask
+                + " prio={" + backPrio + "} wanted=" + savedMask
+                + " {" + savedPrio + "}");
+            check("thread-attrs-restored-power-off-safe", good, "");
+
+            let wr = 0, wn = 0;
+            for (const w of workers) {
+                try {
+                    if (!w.armed) continue;
+                    wn++;
+                    new Uint8Array(maskAb).fill(0xff);
+                    await fireW(w, SYS.cpuset_setaffinity,
+                        [CPU_LEVEL_WHICH, CPU_WHICH_TID, ID, 0x10, maskAddr], 5000);
+                    prioDv.setUint16(0, RTP_PRIO_NORMAL, true);
+                    prioDv.setUint16(2, 0, true);
+                    await fireW(w, SYS.rtprio_thread, [RTP_SET, 0, prioAddr], 5000);
+                    wr++;
+                } catch (e) { }
+            }
+            mark("WORKER-ATTRS-RESTORED", "at=" + why + " n=" + wr + "/" + wn);
+        }
+        restoreCtx = { restore: restoreThreadAttrs };
+        mark("THREAD-ATTRS-SAVED", "mask=" + savedMask
+            + " rtprio={" + savedPrio + "}");
+
         async function jscBreath(n, why) {
-            mark("JSC-BREATH", "start n=" + n + " at=" + why);
             for (let bi = 0; bi < n; ++bi) {
                 await new Promise(r => setTimeout(r, 0));
                 sc(SYS.sched_yield);
@@ -686,7 +766,31 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix";
             mark("JSC-BREATH", "done n=" + n + " at=" + why);
         }
         dropGroomFootprint();
-        await jscBreath(6, "pre-worker-pool");
+        lines.length = 0;
+        await jscBreath(8, "pre-main-pin");
+
+        prioDv.setUint16(0, RTP_PRIO_REALTIME, true);
+        prioDv.setUint16(2, RTP, true);
+        new Uint8Array(maskAb).fill(0);
+        maskDv.setUint32(0, 1 << MAIN_CORE, true);
+        {
+            const a = sc(SYS.cpuset_setaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
+                new int64(0xffffffff, 0xffffffff), 0x10, maskAddr).i32;
+            const r = sc(SYS.rtprio_thread, RTP_SET, 0, prioAddr).i32;
+            check("main-thread-pinned-realtime", a === 0 && r === 0,
+                "core=" + MAIN_CORE + " rtp=" + RTP
+                + " affinity=" + a + " rtprio=" + r);
+        }
+        dropGroomFootprint();
+
+        async function pinWorkerRealtime(w) {
+            sc(SYS.sched_yield);
+            await fireW(w, SYS.cpuset_setaffinity, [CPU_LEVEL_WHICH, CPU_WHICH_TID,
+                new int64(0xffffffff, 0xffffffff), 0x10, maskAddr]);
+            sc(SYS.sched_yield);
+            await fireW(w, SYS.rtprio_thread, [RTP_SET, 0, prioAddr]);
+        }
+
         state("bringing up " + TOTAL_WORKERS + " workers...", "warn");
         for (let i = 0; i < TOTAL_WORKERS; ++i) {
             const name = (i < NUM_IOV_WORKER ? "iov" : "uio")
@@ -723,8 +827,11 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix";
             await w.rpc("setup", 15000, wl.low, wl.hi);
             await w.rpc("armPivot", 15000, G.G0.low, G.G0.hi);
             w.armed = true;
-            await new Promise(r => setTimeout(r, 0));
-            sc(SYS.sched_yield);
+            await pinWorkerRealtime(w);
+            if ((i & 1) === 1) {
+                dropGroomFootprint();
+                await new Promise(r => setTimeout(r, 0));
+            }
         }
         check("worker-came-arw",
             workers.length === TOTAL_WORKERS,
@@ -733,118 +840,10 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix";
         const uioWorkers = workers.slice(NUM_IOV_WORKER);
         mark("WORKER-POOLS", "iov=" + iovWorkers.length
             + " uio=" + uioWorkers.length);
-
-        const prioAb = new ArrayBuffer(8), maskAb = new ArrayBuffer(0x10);
-        keepAlive.push(prioAb, maskAb);
-        const prioAddr = bufAddr(prioAb), maskAddr = bufAddr(maskAb);
-        const prioDv = new DataView(prioAb), maskDv = new DataView(maskAb);
-
-        new Uint8Array(maskAb).fill(0);
-        sc(SYS.cpuset_getaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
-            new int64(0xffffffff, 0xffffffff), 0x10, maskAddr);
-        savedMask = new int64(maskDv.getUint32(0, true), maskDv.getUint32(4, true));
-        prioDv.setUint16(0, 0xffff, true);
-        prioDv.setUint16(2, 0xffff, true);
-        sc(SYS.rtprio_thread, RTP_LOOKUP, 0, prioAddr);
-        savedPrio = [prioDv.getUint16(0, true), prioDv.getUint16(2, true)];
-
-        async function restoreThreadAttrs(why) {
-            if (attrsRestored || !savedMask || !savedPrio) return;
-            attrsRestored = true;
-            const ID = new int64(0xffffffff, 0xffffffff);
-
-            // MAIN THREAD FIRST. attrsRestored is latched at the top of this
-            // function, so a death anywhere below leaves main realtime-256 on
-            // MAIN_CORE AND makes the finally's retry a permanent no-op -- the
-            // console then refuses to power off. The 16 worker RPCs used to run
-            // first, and that is the exact shape of run #52 (SOCKETS-CLOSED,
-            // nothing after). POOPS.LUA:1253-1257 restores ONLY the calling
-            // thread and never touches a worker; we cannot copy that (our
-            // workers outlive the page) but we can copy the ordering.
-            // Widen affinity before dropping priority, never the reverse.
-            new Uint8Array(maskAb).fill(0);
-            maskDv.setUint32(0, savedMask.low, true);
-            maskDv.setUint32(4, savedMask.hi, true);
-            const ar = sc(SYS.cpuset_setaffinity, CPU_LEVEL_WHICH,
-                CPU_WHICH_TID, ID, 0x10, maskAddr).i32;
-            prioDv.setUint16(0, savedPrio[0], true);
-            prioDv.setUint16(2, savedPrio[1], true);
-            const pr = sc(SYS.rtprio_thread, RTP_SET, 0, prioAddr).i32;
-
-            new Uint8Array(maskAb).fill(0);
-            sc(SYS.cpuset_getaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
-                ID, 0x10, maskAddr);
-            const backMask = new int64(maskDv.getUint32(0, true),
-                                       maskDv.getUint32(4, true));
-            prioDv.setUint16(0, 0xffff, true);
-            prioDv.setUint16(2, 0xffff, true);
-            sc(SYS.rtprio_thread, RTP_LOOKUP, 0, prioAddr);
-            const backPrio = [prioDv.getUint16(0, true), prioDv.getUint16(2, true)];
-            const good = backMask.low === savedMask.low
-                && backMask.hi === savedMask.hi
-                && backPrio[0] === savedPrio[0] && backPrio[1] === savedPrio[1];
-            mark("THREAD-ATTRS-RESTORED", "at=" + why + " affinity=" + ar
-                + " rtprio=" + pr + " mask=" + backMask
-                + " prio={" + backPrio + "} wanted=" + savedMask
-                + " {" + savedPrio + "}");
-            check("thread-attrs-restored-power-off-safe", good, "");
-
-            // Workers last, reported separately. By here main is already
-            // restored AND verified, so if these 16 RPCs never come back the
-            // console can still be shut down normally.
-            let wr = 0, wn = 0;
-            for (const w of workers) {
-                try {
-                    if (!w.armed) continue;
-                    wn++;
-                    new Uint8Array(maskAb).fill(0xff);
-                    await fireW(w, SYS.cpuset_setaffinity,
-                        [CPU_LEVEL_WHICH, CPU_WHICH_TID, ID, 0x10, maskAddr], 5000);
-                    prioDv.setUint16(0, RTP_PRIO_NORMAL, true);
-                    prioDv.setUint16(2, 0, true);
-                    await fireW(w, SYS.rtprio_thread, [RTP_SET, 0, prioAddr], 5000);
-                    wr++;
-                } catch (e) { }
-            }
-            mark("WORKER-ATTRS-RESTORED", "at=" + why + " n=" + wr + "/" + wn);
-        }
-
-        restoreCtx = { restore: restoreThreadAttrs };
-        mark("THREAD-ATTRS-SAVED", "mask=" + savedMask
-            + " rtprio={" + savedPrio + "}");
-        prioDv.setUint16(0, RTP_PRIO_REALTIME, true);
-        prioDv.setUint16(2, RTP, true);
-        new Uint8Array(maskAb).fill(0);
-        maskDv.setUint32(0, 1 << MAIN_CORE, true);
-
-        {
-            const a = sc(SYS.cpuset_setaffinity, CPU_LEVEL_WHICH, CPU_WHICH_TID,
-                new int64(0xffffffff, 0xffffffff), 0x10, maskAddr).i32;
-            const r = sc(SYS.rtprio_thread, RTP_SET, 0, prioAddr).i32;
-            check("main-thread-pinned-realtime", a === 0 && r === 0,
-                "core=" + MAIN_CORE + " rtp=" + RTP
-                + " affinity=" + a + " rtprio=" + r);
-        }
-        function fireW(w, num, args, timeoutMs) {
-            if (!w.ctx) w.ctx = makeCtx(false);
-            const stub = stubAddr.get(num);
-            if (!stub)
-                throw new Error("fireW: missing stub num=0x" + (num >>> 0).toString(16));
-            layout(w.ctx, stub, args);
-            return w.rpc("fire", timeoutMs === undefined ? 15000 : timeoutMs,
-                w.ctx.S.low, w.ctx.S.hi);
-        }
-        dropGroomFootprint();
-        lines.splice(0, Math.max(0, lines.length - 48));
-        for (const w of workers) {
-            sc(SYS.sched_yield);
-            await fireW(w, SYS.cpuset_setaffinity, [CPU_LEVEL_WHICH, CPU_WHICH_TID,
-                new int64(0xffffffff, 0xffffffff), 0x10, maskAddr]);
-            sc(SYS.sched_yield);
-            await fireW(w, SYS.rtprio_thread, [RTP_SET, 0, prioAddr]);
-        }
         mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
             + " rtp=" + RTP);
+        state("opening reclaim sockets...", "warn");
+        openIpv6ReclaimSockets();
 
         function tagFor(i) { return (RTHDR_TAG | (i & 0xffff)) >>> 0; }
         function readTag() {
