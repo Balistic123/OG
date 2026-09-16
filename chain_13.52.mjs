@@ -1,7 +1,7 @@
 // ?v=10 must match mem.js's specifier EXACTLY or core.js builds a second
 // module record and releaseFakeCell() (only call site: mem.js:662) reaches a
 // virgin instance, pinning ~137 MB for the life of the page.
-import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=10";
+import { establishPrimitive, dropGroomFootprint } from "./core.mjs?v=11";
 import { installWindowP, pairStatus } from "./mem.mjs";
 import { int64 } from "./int64.mjs";
 import { offsetsFor } from "./ps4_13.52.mjs";
@@ -14,6 +14,19 @@ const stateEl = document.getElementById("state");
 const lines = [];
 const LOG_CAP = 96;
 let passCount = 0, failCount = 0;
+let logQuiet = false;
+
+function paintLog() {
+    const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    outEl.innerHTML = lines.map(function (l) {
+        l = esc(l);
+        const c = /FAIL|ERROR|THREW|REBOOT|MISS|LOST|POISON|TIMEOUT|MISMATCH|ABORTED/i.test(l) ? "bad"
+                : /WARN|SKIP|REFUSED|COMMITTED|DIRTY/i.test(l) ? "warn"
+                : /\bOK\b|PASS|ACHIEVED|RUNNING|ARMED/i.test(l) ? "ok" : "";
+        return c ? '<span class="' + c + '">' + l + "</span>" : l;
+    }).join("\n");
+    outEl.scrollTop = outEl.scrollHeight;
+}
 const params = new URLSearchParams(location.search);
 const STOP_BEFORE_DOUBLE = params.get("stop") === "beforedouble";
 
@@ -50,19 +63,35 @@ function mark(tag, detail) {
 
     const raw = detail;
     detail = terse(detail);
-    lines.push(tag + (detail == null || detail === "" ? "" : "  " + detail));
+    const line = tag + (detail == null || detail === "" ? "" : "  " + detail);
+    lines.push(line);
     if (lines.length > LOG_CAP)
         lines.splice(0, lines.length - LOG_CAP);
-    const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-    outEl.innerHTML = lines.map(function (l) {
-        l = esc(l);
-        const c = /FAIL|ERROR|THREW|REBOOT|MISS|LOST|POISON|TIMEOUT|MISMATCH|ABORTED/i.test(l) ? "bad"
-                : /WARN|SKIP|REFUSED|COMMITTED|DIRTY/i.test(l) ? "warn"
-                : /\bOK\b|PASS|ACHIEVED|RUNNING|ARMED/i.test(l) ? "ok" : "";
-        return c ? '<span class="' + c + '">' + l + "</span>" : l;
-    }).join("\n");
-    outEl.scrollTop = outEl.scrollHeight;
     post(tag, raw);
+    if (logQuiet) {
+        stateEl.textContent = line.length > 160 ? line.slice(0, 160) + "..." : line;
+        return;
+    }
+    paintLog();
+}
+
+async function groomCollect(cycles, mb, ms, why, tick) {
+    if (!(cycles > 0)) return 0;
+    let worst = 0;
+    for (let i = 0; i < cycles; ++i) {
+        const c0 = Date.now();
+        let junk = [];
+        for (let k = 0; k < mb; ++k)
+            junk.push(new ArrayBuffer(0x100000));
+        junk.length = 0; junk = null;
+        await new Promise(r => setTimeout(r, ms));
+        if (tick) tick();
+        const dt = Date.now() - c0;
+        if (dt > worst) worst = dt;
+    }
+    mark("GROOM-COLLECT", "at=" + why + " cycles=" + cycles
+        + " mb=" + mb + " worst_ms=" + worst);
+    return worst;
 }
 
 function trace(tag, detail) { if (VERBOSE) mark(tag, detail); else post(tag, detail); }
@@ -126,7 +155,7 @@ let savedMask = null, savedPrio = null, restoreCtx = null, attrsRestored = false
 
 let allDone = false;
 
-const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
+const CHAIN_BUILD = "plop-13.52-2026-03-26-oomfix2";
 
 (async function () {
     let p = null;
@@ -280,8 +309,15 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
             const gd = dropGroomFootprint();
             mark("GROOM-DROP-CHAIN", "dropped=" + (gd.dropped ? 1 : 0)
                 + (gd.reason ? " reason=" + gd.reason : ""));
-            for (let bi = 0; bi < 16; ++bi)
-                await new Promise(r => setTimeout(r, 16));
+            const COLLECT_CYCLES = params.has("collect")
+                ? parseInt(params.get("collect"), 10) : 10;
+            const COLLECT_MB = params.has("collectmb")
+                ? parseInt(params.get("collectmb"), 10) : 2;
+            const COLLECT_MS = params.has("collectms")
+                ? parseInt(params.get("collectms"), 10) : 55;
+            if (COLLECT_CYCLES > 0)
+                await groomCollect(COLLECT_CYCLES, COLLECT_MB, COLLECT_MS,
+                    "post-groom-drop", null);
         }
         mark("PRIMITIVE-OK", "");
 
@@ -608,6 +644,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
         put(msgDv, 0x10, iovAddr);
         msgDv.setInt32(0x18, NUM_MSG_IOV, true);
 
+        logQuiet = params.get("domlog") !== "1";
         state("setting up...", "warn");
         if (sc(SYS.socketpair, AF_UNIX, SOCK_STREAM, 0, argAddr).i32 === -1)
             throw new Error("socketpair failed");
@@ -636,13 +673,18 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
         new Uint8Array(uioIovAb).fill(0);
         put(uioIovDv, 0, dummyAddr);
         const ipv6 = [];
-        function openIpv6ReclaimSockets() {
+        async function openIpv6ReclaimSockets() {
             ipv6.length = 0;
             dropGroomFootprint();
             for (let i = 0; i < NUM_IPV6_SOCK; ++i) {
                 const s = sc(SYS.socket, AF_INET6, SOCK_STREAM, 0).i32;
                 if (s === -1) break;
                 ipv6.push(s);
+                if ((i & 0x1f) === 0x1f) {
+                    dropGroomFootprint();
+                    await new Promise(r => setTimeout(r, 0));
+                    sc(SYS.sched_yield);
+                }
             }
             check("reclaim-sockets-open", ipv6.length === NUM_IPV6_SOCK,
                 ipv6.length + "/" + NUM_IPV6_SOCK);
@@ -767,7 +809,8 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
         }
         dropGroomFootprint();
         lines.length = 0;
-        await jscBreath(8, "pre-main-pin");
+        await groomCollect(6, 2, 50, "pre-main-pin", () => sc(SYS.sched_yield));
+        await jscBreath(10, "pre-main-pin");
 
         prioDv.setUint16(0, RTP_PRIO_REALTIME, true);
         prioDv.setUint16(2, RTP, true);
@@ -797,7 +840,7 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
                 + (i < NUM_IOV_WORKER ? i : i - NUM_IOV_WORKER);
             const w = { name: name, armed: false, wired: false };
             workers.push(w);
-            w.worker = new Worker("rpc_worker.js?v=1");
+            w.worker = new Worker("rpc_worker.js?v=2");
             w.rpc = makeRpc(w.worker, name);
             if ((await w.rpc("ping", 15000)) !== "pong")
                 throw new Error(name + " did not answer ping");
@@ -843,7 +886,9 @@ const CHAIN_BUILD = "plop-13.52-2026-03-26-pin-reorder";
         mark("WORKERS-PINNED", "n=" + workers.length + " core=" + MAIN_CORE
             + " rtp=" + RTP);
         state("opening reclaim sockets...", "warn");
-        openIpv6ReclaimSockets();
+        await openIpv6ReclaimSockets();
+        logQuiet = false;
+        paintLog();
 
         function tagFor(i) { return (RTHDR_TAG | (i & 0xffff)) >>> 0; }
         function readTag() {

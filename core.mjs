@@ -19,7 +19,7 @@ const CARRIER_SLOTS = (function () {
         const n = q ? parseInt(q, 10) : 0;
         if (n >= 100000 && n <= 40000000) return n;
     } catch (e) { }
-    return 12000000;
+    return 10000000;
 })();
 const CARRIER_BYTES = CARRIER_SLOTS * 8;
 const CAPTURE_DELAY_MS = 50;
@@ -1337,8 +1337,14 @@ function dropGroomFootprintInternal() {
         fillerGraph.length = 0;
         fillerGraph = null;
     }
-    outerGraph = null;
-    keepAlive = null;
+    if (outerGraph !== null) {
+        try { outerGraph.length = 0; } catch (_) { }
+        outerGraph = null;
+    }
+    if (keepAlive !== null) {
+        try { keepAlive.length = 0; } catch (_) { }
+        keepAlive = null;
+    }
     keepIndex = 0;
     getterCarrier = null;
     preparedSymbolObject = null;
